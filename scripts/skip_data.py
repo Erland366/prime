@@ -7,7 +7,7 @@ It can load config from the config file to have the same setup as the real run.
 
 example.
 ```
-uv run torchrun --nproc_per_node=4 scripts/skip_data.py @configs/150M/3090.toml --optim.total_steps 100 --ckpt.data_path out_data
+ torchrun --nproc_per_node=4 scripts/skip_data.py @configs/150M/3090.toml --optim.total_steps 100 --ckpt.data_path out_data
 ```
 
 """

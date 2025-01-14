@@ -1,5 +1,6 @@
 import os
 import time
+from dotenv import load_dotenv
 from multiprocessing.process import _children
 
 import torch
@@ -28,6 +29,7 @@ from zeroband.utils import (
     get_optimizer_signature,
     get_tensor_list_signature,
 )
+from zeroband.utils.helpers import login_hf, login_wandb, is_debug_py
 from zeroband.utils.activation_ckpt import apply_ac_ckpt
 from zeroband.data import TEST_VOCAB_SIZE, get_dataloader
 from zeroband.utils.metric_logger import MetricLogger, WandbMetricLogger, DummyMetricLogger
@@ -38,6 +40,13 @@ from zeroband.utils.world_info import get_world_info
 from zeroband.utils.logging import get_logger
 from zeroband.checkpoint import CkptManager, TrainingProgress
 from zeroband.lr_scheduler import get_scheduler
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+if not is_debug_py():
+    os.environ["WANDB_PROJECT"] = "DiLoCo"
 
 def log_hash_training_state(
     config: Config,
@@ -91,6 +100,8 @@ def train(config: Config):
 
     if config.data.fake and config.name_model == "debugmodel":
         tokenizer = FakeTokenizer()
+    elif config.type_model == "llama":
+        tokenizer = AutoTokenizer.from_pretrained("keeeeenw/MicroLlama", use_fast=True)
     elif config.type_model == "llama2":
         tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1", use_fast=True)
     elif config.type_model == "llama3":
@@ -191,12 +202,15 @@ def train(config: Config):
     )
 
     if world_info.rank == 0:
-        logger_cls = WandbMetricLogger if config.metric_logger_type == "wandb" else DummyMetricLogger
-        metric_logger = logger_cls(
-            project=config.project,
-            config={"config": config.model_dump(), "world_info": world_info.json()},
-            resume=config.wandb_resume,
-        )
+        if not is_debug_py():
+            logger_cls = WandbMetricLogger if config.metric_logger_type == "wandb" else DummyMetricLogger
+            metric_logger = logger_cls(
+                project=config.project,
+                config={"config": config.model_dump(), "world_info": world_info.json()},
+                resume=config.wandb_resume,
+            )
+        else:
+            metric_logger = None
     else:
         metric_logger = None
 
@@ -464,6 +478,11 @@ if __name__ == "__main__":
 
     world_info = get_world_info()
     logger = get_logger()
+    if world_info.local_rank == 0:
+        import os
+
+        if not is_debug_py():
+            login_wandb(os.environ["WANDB_API_KEY"])
 
     torch.cuda.set_device(world_info.local_rank)
 

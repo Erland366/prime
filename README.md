@@ -78,8 +78,15 @@ huggingface-cli login
 5. Download the data 
 ```
 mkdir -p datasets
-uv run python scripts/subset_data.py --dataset_name PrimeIntellect/fineweb-edu --data_world_size 1 --data_rank 0 --max_shards 32
+python scripts/subset_data.py --dataset_name PrimeIntellect/fineweb-edu --data_world_size 1 --data_rank 0 --max_shards 32
 mv fineweb-edu/ datasets/fineweb-edu/
+```
+
+or use the testing dataset
+```
+mkdir -p datasets
+python scripts/subset_data.py --dataset_name Erland/fineweb-edu-cleaned-simplified-subset --data_world_size 1 --data_rank 0 --max_shards 32
+mv fineweb-edu-cleaned-simplified-subset/ datasets/fineweb-edu/
 ```
 
 
@@ -88,7 +95,7 @@ mv fineweb-edu/ datasets/fineweb-edu/
 Verify your setup:
 
 ```bash
-GLOO_SOCKET_IFNAME=lo GLOBAL_ADDR=localhost GLOBAL_RANK=0 GLOBAL_UNIQUE_ID=0 GLOBAL_WORLD_SIZE=1 GLOBAL_PORT=8989  uv run torchrun --nproc_per_node=2 src/zeroband/train.py  @configs/debug/diloco.toml
+GLOO_SOCKET_IFNAME=lo GLOBAL_ADDR=localhost GLOBAL_RANK=0 GLOBAL_UNIQUE_ID=0 GLOBAL_WORLD_SIZE=1 GLOBAL_PORT=8989  torchrun --nproc_per_node=2 src/zeroband/train.py  @configs/debug/diloco.toml
 ```
 
 ## Usage
@@ -109,7 +116,7 @@ ZERO_BAND_LOG_LEVEL=DEBUG ./scripts/simulate_multi_node_diloco.sh 2 1 src/zeroba
 
 Ensure you have at least two GPU to run the full test suite:
 ```bash
-uv run pytest
+ pytest
 ```
 
 
@@ -118,12 +125,12 @@ uv run pytest
 To eval you need first to convert the checkpoint to a huggingface compatible model.
 
 ```bash
-uv run python scripts/export_dcp.py @configs/10B/H100.toml --ckpt.path CONVERTED_MODEL_PATH --ckpt.resume CHECKPOINT_PATH --torch_dtype bfloat16  --ckpt.interval 1
+ python scripts/export_dcp.py @configs/10B/H100.toml --ckpt.path CONVERTED_MODEL_PATH --ckpt.resume CHECKPOINT_PATH --torch_dtype bfloat16  --ckpt.interval 1
 ```
 
 
 ```
-uv run accelerate launch -m lm_eval --model hf --model_args pretrained=CONVERTED_MODEL_PATH,add_bos_token=True  --tasks hellaswag --num_fewshot 10
+ accelerate launch -m lm_eval --model hf --model_args pretrained=CONVERTED_MODEL_PATH,add_bos_token=True  --tasks hellaswag --num_fewshot 10
 ```
 
 

@@ -498,11 +498,22 @@ class ElasticDeviceMesh:
         try:
             from zeroband.utils.ip import get_ip_address
 
+            iperf_command = "iperf"
+            try:
+                subprocess.Popen([iperf_command], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except FileNotFoundError as _:
+                iperf_command = "iperf3"
+
+            try:
+                subprocess.Popen([iperf_command], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except FileNotFoundError as _:
+                raise ValueError("Zeroband : Cannot find either `iperf` or `iperf3`. Please install `iperf` or `iperf3` first")
+
             iperf_addr = get_ip_address(IPERF_IFNAME)
             iperf_port = IPERF_PORT + self.world_info.global_rank
-            cmd: List[str] = ["iperf", "-s", "-p", str(iperf_port)]
+            cmd: List[str] = [iperf_command, "-s", "-p", str(iperf_port)]
             self.server_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            self.god_store.set(f"iperf_{self.world_info.global_unique_id}", f"{iperf_addr}:{iperf_port}")
+            self.god_store.set(f"{iperf_command} {self.world_info.global_unique_id}", f"{iperf_addr}:{iperf_port}")
             self._logger.info(f"Started iperf server on {iperf_addr} with port {iperf_port}")
         except Exception as e:
             self._logger.error(f"Failed to start iperf server: {str(e)}")

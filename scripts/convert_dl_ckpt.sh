@@ -17,7 +17,7 @@ for i in {0..7}; do
         echo "Checkpoint ${CHECKPOINT_PATH} has already been processed, skipping." &
     else
         (
-            uv run python scripts/convert_dl_state.py @configs/10B/H100.toml \
+             python scripts/convert_dl_state.py @configs/10B/H100.toml \
                 --input_path "$CHECKPOINT_PATH" \
                 --output_path "$TMP_PATH" \
                 --rank "$i" \
