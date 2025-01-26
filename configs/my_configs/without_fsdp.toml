@@ -4,11 +4,14 @@ type_model = "llama2"
 metric_logger_type = "tensorboard"
 
 [train]
-micro_bs = 8 # change this base on the gpu
+micro_bs = 16 # change this base on the gpu
 
 [data]
 num_workers = 1
 dataset_name_or_paths = "datasets/fineweb-edu/data"
+
+[experiment]
+fsdp = false
 
 [optim]
 batch_size = 512

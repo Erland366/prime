@@ -55,6 +55,8 @@ class MonitorConfig(BaseConfig):
     base_url: str | None = None
     auth_token: str | None = None
 
+class ExperimentConfig(BaseConfig):
+    fsdp: bool = True
 
 class Config(BaseConfig):
     # main config
@@ -63,13 +65,15 @@ class Config(BaseConfig):
 
     project: str = "zeroband"
     run_id: str | None = None
-    metric_logger_type: Literal["wandb", "dummy"] = "wandb"
+    run_name: str | None = None
+    metric_logger_type: str = "wandb"
     wandb_resume: bool = False
 
     # sub config
     diloco: DilocoConfig | None = None
     data: DataConfig = DataConfig()
     optim: OptimConfig = OptimConfig()
+    experiment: ExperimentConfig = ExperimentConfig()
     train: TrainConfig
     monitor: MonitorConfig | None = None
 

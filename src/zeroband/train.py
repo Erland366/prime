@@ -2,6 +2,7 @@ import os
 import time
 from dotenv import load_dotenv
 from multiprocessing.process import _children
+from contextlib import nullcontext
 
 import torch
 from pydantic_config import parse_argv
@@ -11,6 +12,8 @@ from torch.nn import functional as F
 from transformers import AutoTokenizer
 
 from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
+from torch.amp import GradScaler
+from torch import autocast
 
 import torch.distributed as dist
 from zeroband import utils
@@ -32,7 +35,13 @@ from zeroband.utils import (
 from zeroband.utils.helpers import login_hf, login_wandb, is_debug_py
 from zeroband.utils.activation_ckpt import apply_ac_ckpt
 from zeroband.data import TEST_VOCAB_SIZE, get_dataloader
-from zeroband.utils.metric_logger import MetricLogger, WandbMetricLogger, DummyMetricLogger
+from zeroband.utils.metric_logger import (
+    MetricLogger, 
+    WandbMetricLogger, 
+    TensorboardMetricLogger, 
+    CombineMetricLogger,
+    DummyMetricLogger,
+)
 from zeroband.utils.monitor import HttpMonitor
 from zeroband.models.llama import get_model
 from zeroband.utils.profiler import MemoryProfiler
@@ -147,32 +156,39 @@ def train(config: Config):
         num = 1 if isinstance(config.train.ac_ckpt, bool) else config.train.ac_ckpt
         apply_ac_ckpt(model, num)
 
-    elastic_device_mesh = ElasticDeviceMesh(
-        enable=config.diloco is not None, live_recovery_rank_src=config.ckpt.live_recovery_rank_src
-    )
+    if config.experiment.fsdp:
+        elastic_device_mesh = ElasticDeviceMesh(
+            enable=config.diloco is not None, live_recovery_rank_src=config.ckpt.live_recovery_rank_src
+        )
 
-    mp_policy = MixedPrecisionPolicy(
-        param_dtype=torch.bfloat16, reduce_dtype=torch.float32 if config.train.reduce_fp32 else None
-    )
+        mp_policy = MixedPrecisionPolicy(
+            param_dtype=torch.bfloat16, reduce_dtype=torch.float32 if config.train.reduce_fp32 else None
+        )
 
-    for layer_id, transformer_block in model.layers.items():
-        if config.train.reshard_after_forward:
-            reshard_after_forward = int(layer_id) < len(model.layers) - 1
-        else:
-            reshard_after_forward = False
+        for layer_id, transformer_block in model.layers.items():
+            if config.train.reshard_after_forward:
+                reshard_after_forward = int(layer_id) < len(model.layers) - 1
+            else:
+                reshard_after_forward = False
+            fully_shard(
+                transformer_block,
+                mp_policy=mp_policy,
+                mesh=elastic_device_mesh.cuda_local_mesh,
+                reshard_after_forward=reshard_after_forward,
+            )
         fully_shard(
-            transformer_block,
+            model,
             mp_policy=mp_policy,
             mesh=elastic_device_mesh.cuda_local_mesh,
-            reshard_after_forward=reshard_after_forward,
+            reshard_after_forward=config.train.reshard_after_forward,
         )
-    fully_shard(
-        model,
-        mp_policy=mp_policy,
-        mesh=elastic_device_mesh.cuda_local_mesh,
-        reshard_after_forward=config.train.reshard_after_forward,
-    )
-    logger.debug("model fsdped")
+        logger.debug("model fsdped")
+        cast_ctx_manager = nullcontext()
+    else:
+        # If non-FSDP, then we need to implement our own mixed precision
+        scaler = GradScaler(device="cuda")
+        cast_ctx_manager = autocast(device_type="cuda", dtype=torch.bfloat16)
+
 
     # Setup optimizers
     inner_optimizer = get_optimizer(model.parameters(), config.optim.optim)
@@ -203,11 +219,13 @@ def train(config: Config):
 
     if world_info.rank == 0:
         if not is_debug_py():
-            logger_cls = WandbMetricLogger if config.metric_logger_type == "wandb" else DummyMetricLogger
-            metric_logger = logger_cls(
+            config.metric_logger_type = config.metric_logger_type.split(",")
+            metric_logger = CombineMetricLogger(
                 project=config.project,
                 config={"config": config.model_dump(), "world_info": world_info.json()},
                 resume=config.wandb_resume,
+                name=config.run_name,
+                logger_cls=config.metric_logger_type,
             )
         else:
             metric_logger = None
@@ -304,7 +322,8 @@ def train(config: Config):
             for grad_acc_step in range(gradient_accumulation_steps):
                 is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
                 # no sync if we are accumulating gradients
-                model.set_requires_gradient_sync(not is_accumulating)
+                if config.experiment.fsdp:
+                    model.set_requires_gradient_sync(not is_accumulating)
 
                 batch = next(train_dataloader_iterator)
                 input_ids = batch["input_ids"].to("cuda")
@@ -315,25 +334,31 @@ def train(config: Config):
                 else:
                     block_mask = None
 
-                logits = model(tokens=input_ids, block_mask=block_mask).contiguous()
-                flatten_logits = rearrange(logits, "b seq vocab -> (b seq) vocab")
-                flatten_labels = rearrange(labels, "b seq -> (b seq)")
+                with cast_ctx_manager:
+                    # Both model and loss function should be autocasted
+                    logits = model(tokens=input_ids, block_mask=block_mask).contiguous()
+                    flatten_logits = rearrange(logits, "b seq vocab -> (b seq) vocab")
+                    flatten_labels = rearrange(labels, "b seq -> (b seq)")
 
-                if config.optim.z_loss:
-                    ce_loss, z_loss = cross_entropy_max_z_loss(
-                        flatten_logits, flatten_labels, config.optim.z_loss_weight
-                    )
-                    ce_loss /= gradient_accumulation_steps
-                    z_loss /= gradient_accumulation_steps
+                    if config.optim.z_loss:
+                        ce_loss, z_loss = cross_entropy_max_z_loss(
+                            flatten_logits, flatten_labels, config.optim.z_loss_weight
+                        )
+                        ce_loss /= gradient_accumulation_steps
+                        z_loss /= gradient_accumulation_steps
 
-                    del logits
-                    loss = ce_loss + z_loss
+                        del logits
+                        loss = ce_loss + z_loss
+
+                    else:
+                        loss = F.cross_entropy(flatten_logits, flatten_labels) / gradient_accumulation_steps
+                        del logits
+
+                if config.experiment.fsdp:
                     loss.backward()
-
                 else:
-                    loss = F.cross_entropy(flatten_logits, flatten_labels) / gradient_accumulation_steps
-                    del logits
-                    loss.backward()
+                    scaler.scale(loss).backward()
+
 
                 if config.optim.z_loss:
                     loss_batch += ce_loss.clone().detach()
@@ -341,12 +366,20 @@ def train(config: Config):
                 else:
                     loss_batch += loss.clone().detach()
 
-            dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg)
-            if config.optim.z_loss:
+            if config.experiment.fsdp:
+                dist.all_reduce(tensor=loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg)
+            if config.optim.z_loss and config.experiment.fsdp:
                 dist.all_reduce(tensor=z_loss_batch, op=dist.ReduceOp.AVG, group=elastic_device_mesh.local_pg)
 
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            inner_optimizer.step()
+            if config.experiment.fsdp:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                inner_optimizer.step()
+            else:
+                # Unscale first before gradient clipping
+                scaler.unscale_(inner_optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                scaler.step(inner_optimizer)
+                scaler.update()
             scheduler.step()
             inner_optimizer.zero_grad()
 
