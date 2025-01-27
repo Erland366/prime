@@ -57,6 +57,7 @@ class MonitorConfig(BaseConfig):
 
 class ExperimentConfig(BaseConfig):
     fsdp: bool = True
+    log_all_rank: bool = False
 
 class Config(BaseConfig):
     # main config

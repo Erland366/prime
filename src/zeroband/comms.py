@@ -57,6 +57,21 @@ class ElasticDeviceMesh:
         # Initialize global process group
         self.global_pg = FakeProcessGroup(self.world_info.rank, 1)
 
+        # Figuring out the `iperf` command since it can be either `iperf` or `iperf3`
+        # You can always built alias tho but still
+        iperf_command = "iperf"
+        try:
+            subprocess.Popen([iperf_command], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except FileNotFoundError as _:
+            iperf_command = "iperf3"
+
+        try:
+            subprocess.Popen([iperf_command], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except FileNotFoundError as _:
+            raise ValueError("Zeroband : Cannot find either `iperf` or `iperf3`. Please install `iperf` or `iperf3` first")
+
+        self.iperf_command = iperf_command
+
         self.enable = enable
         if enable:
             self._init_global_pg()
@@ -83,6 +98,7 @@ class ElasticDeviceMesh:
             self.global_pg.barrier().wait()
 
             self._logger.info(f"global_pg size : {self.global_pg.size()}, local_pg size: {self.local_pg.size()}")
+
 
     def __del__(self):
         self._stop_heartbeat()
@@ -249,6 +265,8 @@ class ElasticDeviceMesh:
 
         # Initialize store values
         self._init_global_store_values()
+
+        self._logger.debug("Complete Initializing Global Stores")
 
         self.live_recovery = LiveRecovery(store=self.global_store)
 
@@ -498,22 +516,11 @@ class ElasticDeviceMesh:
         try:
             from zeroband.utils.ip import get_ip_address
 
-            iperf_command = "iperf"
-            try:
-                subprocess.Popen([iperf_command], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except FileNotFoundError as _:
-                iperf_command = "iperf3"
-
-            try:
-                subprocess.Popen([iperf_command], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except FileNotFoundError as _:
-                raise ValueError("Zeroband : Cannot find either `iperf` or `iperf3`. Please install `iperf` or `iperf3` first")
-
             iperf_addr = get_ip_address(IPERF_IFNAME)
             iperf_port = IPERF_PORT + self.world_info.global_rank
-            cmd: List[str] = [iperf_command, "-s", "-p", str(iperf_port)]
+            cmd: List[str] = [self.iperf_command, "-s", "-p", str(iperf_port)]
             self.server_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            self.god_store.set(f"{iperf_command} {self.world_info.global_unique_id}", f"{iperf_addr}:{iperf_port}")
+            self.god_store.set(f"{self.iperf_command}_{self.world_info.global_unique_id}", f"{iperf_addr}:{iperf_port}")
             self._logger.info(f"Started iperf server on {iperf_addr} with port {iperf_port}")
         except Exception as e:
             self._logger.error(f"Failed to start iperf server: {str(e)}")
@@ -523,7 +530,7 @@ class ElasticDeviceMesh:
         for i in self._global_ids:
             if i == self.world_info.global_unique_id:
                 continue
-            target_host, target_port = self.god_store.get(f"iperf_{i}").decode("utf-8").split(":")
+            target_host, target_port = self.god_store.get(f"{self.iperf_command}_{i}").decode("utf-8").split(":")
             target_port = int(target_port)
             time_taken = self.measure_bandwidth(target_host, target_port)
             self.god_store.set(f"ping_{self.world_info.global_unique_id}_{i}", str(time_taken))
@@ -541,7 +548,7 @@ class ElasticDeviceMesh:
         """
         try:
             cmd: List[str] = [
-                "iperf",
+                f"{self.iperf_command}",
                 "-c",
                 target_host,
                 "-p",
@@ -549,10 +556,11 @@ class ElasticDeviceMesh:
                 "-t",
                 "1",  # 1 second test
             ]
+            print(f"{cmd = }")
             result: subprocess.CompletedProcess = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
 
             if result.returncode != 0:
-                raise Exception(f"iperf error: {result.stderr}")
+                raise Exception(f"Zeroband: {self.iperf_command} error: {result.stderr}")
 
             time_taken: int = int(1e13 / parse_iperf_output(result.stdout))
             time_taken = min(time_taken, 1_000_000_000)

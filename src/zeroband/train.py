@@ -156,10 +156,11 @@ def train(config: Config):
         num = 1 if isinstance(config.train.ac_ckpt, bool) else config.train.ac_ckpt
         apply_ac_ckpt(model, num)
 
+
+    elastic_device_mesh = ElasticDeviceMesh(
+        enable=config.diloco is not None, live_recovery_rank_src=config.ckpt.live_recovery_rank_src
+    )
     if config.experiment.fsdp:
-        elastic_device_mesh = ElasticDeviceMesh(
-            enable=config.diloco is not None, live_recovery_rank_src=config.ckpt.live_recovery_rank_src
-        )
 
         mp_policy = MixedPrecisionPolicy(
             param_dtype=torch.bfloat16, reduce_dtype=torch.float32 if config.train.reduce_fp32 else None
@@ -425,6 +426,14 @@ def train(config: Config):
             if config.diloco is not None:
                 metrics["num_peers"] = elastic_device_mesh.global_pg.size()
                 log += f", diloco_peers: {metrics['num_peers']}"
+
+            if config.experiment.log_all_rank:
+                new_metrics = {}
+                new_metrics[f"Loss_rank_{world_info.rank}"] = metrics["Loss"]
+                metric_logger.log(new_metrics)
+                del metrics["Loss"]
+                if config.monitor is not None:
+                    monitor.log(metrics)
 
             if world_info.rank == 0:
                 metric_logger.log(metrics)

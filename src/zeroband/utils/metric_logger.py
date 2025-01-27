@@ -78,8 +78,10 @@ class TensorboardMetricLogger:
             name = random_name.lower().replace(" ", "_") + str(random_int)
 
         create_project_folder(os.path.join(base_dir, project, name))
-        with open(f"{os.path.join(base_dir, project, name, 'config.json')}", "w") as f:
-            json.dump(config, f, indent=4)
+
+        # TODO: Make sure everything is serializable
+        # with open(f"{os.path.join(base_dir, project, name, 'config.json')}", "w") as f:
+        #     json.dump(config, f, indent=4)
 
         self._writer = SummaryWriter(
             log_dir=os.path.join(base_dir, project, name),
