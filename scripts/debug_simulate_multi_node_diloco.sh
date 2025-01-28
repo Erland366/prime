@@ -56,8 +56,12 @@ NUM_GPU=$2
 shift 2     # Remove the first three arguments so $@ contains only additional Python arguments
 
 FLAG=""
+GPU_DEBUG=""
 if [ "$1" == "--debug" ]; then
     FLAG="--debug"
+    shift
+
+    GPU_DEBUG="$1"
     shift
 fi
 
@@ -79,7 +83,7 @@ export PYDEVD_THREAD_DUMP_ON_WARN_EVALUATION_TIMEOUT=true # Print thread dump on
 for i in $(seq 0 $(($N - 1 )))
 do
     > logs/log$i.log
-    if [ -n "FLAG" ] && [ $i -eq 0 ]; then
+    if [ -n "FLAG" ] && [ $i -eq $GPU_DEBUG ]; then
         echo "Enter debug"
         WANDB_MODE="offline" GLOBAL_UNIQUE_ID=$i GLOBAL_RANK=$i CUDA_VISIBLE_DEVICES=$(get_cuda_devices $NUM_GPU $i) debugpy-run -m torch.distributed.run -- --nproc_per_node=$NUM_GPU --node-rank 0 --rdzv-endpoint localhost:$((BASE_PORT + $i)) --nnodes=1  $@ --data.data_rank $i --data.data_world_size $N > logs/log$i.log 2>&1 &
     else
@@ -89,7 +93,7 @@ do
 done
 
 # Start tail in background and store its PID separately
-tail -f logs/log0.log &
+tail -f logs/log$GPU_DEBUG.log &
 tail_pid=$!
 
 # Wait for the main processes only

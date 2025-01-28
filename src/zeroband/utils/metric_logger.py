@@ -53,9 +53,9 @@ class CombineMetricLogger:
             )
             self._logger_cls.append(metric_logger)
 
-    def log(self, metrics: dict[str, Any]):
+    def log(self, metrics: dict[str, Any], step=None):
         for i in range(len(self._logger_cls)):
-            self._logger_cls[i].log(metrics)
+            self._logger_cls[i].log(metrics, step)
 
     def finish(self):
         for i in range(len(self._logger_cls)):
@@ -89,9 +89,9 @@ class TensorboardMetricLogger:
             comment=name
         )
 
-    def log(self, metrics: dict[str, Any]):
+    def log(self, metrics: dict[str, Any], step=None):
         for name, value in metrics.items():
-            self._writer.add_scalar(name, value, self._step)
+            self._writer.add_scalar(name, value, step or self._step)
         self._step += 1
 
     def finish(self):
@@ -109,10 +109,10 @@ class WandbMetricLogger:
             name=name
         )  # make wandb reuse the same run id if possible
 
-    def log(self, metrics: dict[str, Any]):
+    def log(self, metrics: dict[str, Any], step=None):
         import wandb
 
-        wandb.log(metrics)
+        wandb.log(metrics, step)
 
     def finish(self):
         import wandb

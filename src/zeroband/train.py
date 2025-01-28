@@ -49,6 +49,7 @@ from zeroband.utils.world_info import get_world_info
 from zeroband.utils.logging import get_logger
 from zeroband.checkpoint import CkptManager, TrainingProgress
 from zeroband.lr_scheduler import get_scheduler
+from zeroband.inner_scheduler import ContinuousInnerStepScheduler, BinnedInnerStepScheduler
 
 from dotenv import load_dotenv
 
@@ -218,6 +219,29 @@ def train(config: Config):
         diloco_offloaded_param_list=diloco.param_list_cpu if config.diloco is not None else None,
     )
 
+    if config.experiment.inner_scheduler_type is not None:
+        if config.experiment.inner_scheduler_type == "continuous":
+            inner_scheduler_cls = ContinuousInnerStepScheduler
+            inner_scheduler_args = dict(
+                start_inner_steps=config.experiment.inner_scheduler_start,
+                end_inner_steps=config.experiment.inner_scheduler_end,
+                total_steps=config.optim.total_steps,
+            )
+        elif config.experiment.inner_scheduler_type == "binned":
+            inner_scheduler_cls = BinnedInnerStepScheduler
+            inner_scheduler_args = dict(
+                start_inner_steps=config.experiment.inner_scheduler_start,
+                end_inner_steps=config.experiment.inner_scheduler_end,
+                total_steps=config.optim.total_steps,
+                bin_size=config.experiment.inner_scheduler_bin_size,
+                num_bins=config.experiment.inner_scheduler_num_bins
+            )
+        else:
+            raise ValueError(f"Invalid value for {config.experiment.inner_scheduler_type}")
+        inner_step_scheduler = inner_scheduler_cls(
+            **inner_scheduler_args
+        )
+    
     if world_info.rank == 0:
         if not is_debug_py():
             config.metric_logger_type = config.metric_logger_type.split(",")
@@ -265,6 +289,8 @@ def train(config: Config):
 
     need_live_recovery = config.ckpt.live_recovery_rank_src is not None
     while True:
+        if config.experiment.inner_scheduler_type is not None:
+            num_inner_steps = inner_step_scheduler.get_inner_steps()
         if num_inner_steps > 1:
             # if we don't use diloco we don't print the outer step logs
             logger.info(f"outer_step step: {training_progress.outer_step}")
@@ -382,6 +408,8 @@ def train(config: Config):
                 scaler.step(inner_optimizer)
                 scaler.update()
             scheduler.step()
+            if config.experiment.inner_scheduler_type is not None:
+                inner_step_scheduler.step()
             inner_optimizer.zero_grad()
 
             # logging
@@ -407,6 +435,7 @@ def train(config: Config):
                 "Perplexity": torch.exp(loss_batch).item(),
                 "total_tokens": training_progress.total_tokens,
                 "time": time.time(),
+                "num_inner_steps" : num_inner_steps
             }
 
             if config.optim.z_loss:
@@ -426,14 +455,6 @@ def train(config: Config):
             if config.diloco is not None:
                 metrics["num_peers"] = elastic_device_mesh.global_pg.size()
                 log += f", diloco_peers: {metrics['num_peers']}"
-
-            if config.experiment.log_all_rank:
-                new_metrics = {}
-                new_metrics[f"Loss_rank_{world_info.rank}"] = metrics["Loss"]
-                metric_logger.log(new_metrics)
-                del metrics["Loss"]
-                if config.monitor is not None:
-                    monitor.log(metrics)
 
             if world_info.rank == 0:
                 metric_logger.log(metrics)

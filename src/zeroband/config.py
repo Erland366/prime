@@ -57,7 +57,11 @@ class MonitorConfig(BaseConfig):
 
 class ExperimentConfig(BaseConfig):
     fsdp: bool = True
-    log_all_rank: bool = False
+    inner_scheduler_type: Literal["continuous", "binned", None] = None
+    inner_scheduler_start: int = 20
+    inner_scheduler_end: int = 2000
+    inner_scheduler_bin_size: int | None = None 
+    inner_scheduler_num_bins: int | None = None 
 
 class Config(BaseConfig):
     # main config

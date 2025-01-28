@@ -1,5 +1,5 @@
 name_model = "150M"
-project = "debug_150m_zero_band_without_fsdp"
+project = "150m_zeroband_binned"
 type_model = "llama2"
 metric_logger_type = "tensorboard,wandb"
 
@@ -12,7 +12,10 @@ dataset_name_or_paths = "datasets/fineweb-edu/data"
 
 [experiment]
 fsdp = true
-log_all_rank = true
+inner_scheduler_type = "binned"
+inner_scheduler_start = 10
+inner_scheduler_end = 2000
+inner_scheduler_bin_size = 10
 
 [optim]
 batch_size = 512
