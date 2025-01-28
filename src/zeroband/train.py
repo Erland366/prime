@@ -241,6 +241,13 @@ def train(config: Config):
         inner_step_scheduler = inner_scheduler_cls(
             **inner_scheduler_args
         )
+
+    # Set run name for easier tracking
+    if config.run_name is not None:
+        if config.experiment.inner_scheduler_type is not None:
+            config.run_name += f"-{config.experiment.inner_scheduler_type}"
+            config.run_name += f"-{config.experiment.inner_scheduler_start}"
+            config.run_name += f"_{config.experiment.inner_scheduler_end}"
     
     if world_info.rank == 0:
         if not is_debug_py():

@@ -1,7 +1,8 @@
 name_model = "150M"
-project = "150m_zeroband_continuous"
+project = "150m_zeroband_adaptive"
 type_model = "llama2"
 metric_logger_type = "tensorboard,wandb"
+run_name = "continuous"
 
 [train]
 micro_bs = 16 # change this base on the gpu
@@ -14,12 +15,12 @@ dataset_name_or_paths = "datasets/fineweb-edu/data"
 fsdp = true
 inner_scheduler_type = "continuous"
 inner_scheduler_start = 10
-inner_scheduler_end = 2000
+inner_scheduler_end = 500
 
 [optim]
 batch_size = 512
 warmup_steps = 500
-total_steps = 8192
+total_steps = 1024
 
 [diloco]
 inner_steps = 10
