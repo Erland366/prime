@@ -195,7 +195,7 @@ def train(config: Config):
     # Setup optimizers
     inner_optimizer = get_optimizer(model.parameters(), config.optim.optim)
 
-    diloco = Diloco(config.diloco, model, elastic_device_mesh) if config.diloco is not None else None
+    diloco = Diloco(config.diloco, model, elastic_device_mesh, config.experiment) if config.diloco is not None else None
 
     scheduler = get_scheduler(
         sched_type=config.optim.sched_type,

@@ -63,6 +63,8 @@ class ExperimentConfig(BaseConfig):
     inner_scheduler_bin_size: int | None = None 
     inner_scheduler_num_bins: int | None = None 
 
+    weighted_pseudo_gradient: bool = False
+
 class Config(BaseConfig):
     # main config
     name_model: Literal["debugmodel", "150M", "271M", "1B", "7B", "10B", "13B", "26B", "70B"] = "150M"

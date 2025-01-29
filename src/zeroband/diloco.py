@@ -1,3 +1,4 @@
+from __future__ import annotations
 import re
 import time
 from pydantic_config import BaseConfig
@@ -60,6 +61,7 @@ class Diloco:
         config: DilocoConfig,
         model: nn.Module,
         elastic_device_mesh: ElasticDeviceMesh,
+        experiment_config: "ExperimentConfig"
     ):
         self.config = config
 
@@ -73,6 +75,8 @@ class Diloco:
         self.world_info = get_world_info()
 
         self._init_offloaded_optimizer(model=model)
+
+        self.experiment_config = experiment_config
 
     @torch.no_grad()
     def _init_offloaded_optimizer(self, model):
@@ -103,7 +107,13 @@ class Diloco:
                     param_offloaded.grad.to_local().zero_()
                 else:
                     param_offloaded.grad.to_local().copy_(param_offloaded.data.to_local())
-                    param_offloaded.grad.to_local().sub_(param.data.to_local().to(param_offloaded.data.device))
+                    if self.experiment_config.weighted_pseudo_gradient:
+                        # Get world size
+                        world_size = self.elastic_device_mesh.world_info.global_world_size
+                        self._logger.debug(f"Scale pseudo gradient to : 1 / {world_size}")
+                        param_offloaded.grad.to_local().sub_(param.data.to_local().to(param_offloaded.data.device) / world_size)
+                    else:
+                        param_offloaded.grad.to_local().sub_(param.data.to_local().to(param_offloaded.data.device))
             try:
                 self.offloaded_grad_flat_tensor.div_(world_size)
                 _collective_start_time = time.perf_counter()

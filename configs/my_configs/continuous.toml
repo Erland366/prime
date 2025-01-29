@@ -2,7 +2,7 @@ name_model = "150M"
 project = "150m_zeroband_adaptive"
 type_model = "llama2"
 metric_logger_type = "tensorboard,wandb"
-run_name = "continuous"
+run_name = "continuous-weighted"
 
 [train]
 micro_bs = 16 # change this base on the gpu
@@ -16,6 +16,7 @@ fsdp = true
 inner_scheduler_type = "continuous"
 inner_scheduler_start = 10
 inner_scheduler_end = 500
+weighted_pseudo_gradient = true
 
 [optim]
 batch_size = 512
@@ -24,6 +25,7 @@ total_steps = 1024
 
 [diloco]
 inner_steps = 10
+compression = "no"
 
 [optim.optim]
 lr = 4e-4

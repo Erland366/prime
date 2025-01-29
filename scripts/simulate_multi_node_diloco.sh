@@ -55,6 +55,18 @@ N=$1         # Set N from the first argument
 NUM_GPU=$2
 shift 2     # Remove the first three arguments so $@ contains only additional Python arguments
 
+FLAG=""
+GPU_DEBUG="0"
+if [ "$1" == "--debug" ]; then
+    FLAG="--debug"
+    shift
+
+    if [[ "$1" =~ ^[0-9]+$ ]]; then
+        GPU_DEBUG="$1"
+        shift
+    fi
+fi
+
 # Register the cleanup function to be called on SIGINT (Ctrl+C)
 trap cleanup SIGINT
 
@@ -67,15 +79,23 @@ export GLOBAL_WORLD_SIZE=$N
 export BASE_PORT=${BASE_PORT:-10003}
 export GLOO_SOCKET_IFNAME=lo
 
+export PYDEVD_UNBLOCK_THREADS_TIMEOUT=5  # Unblock threads after 5 seconds
+export PYDEVD_THREAD_DUMP_ON_WARN_EVALUATION_TIMEOUT=true # Print thread dump on timeout
+
 for i in $(seq 0 $(($N - 1 )))
 do
     > logs/log$i.log
-    WANDB_MODE=$([ $i -eq 0 ] && echo "online" || echo "offline") GLOBAL_UNIQUE_ID=$i GLOBAL_RANK=$i CUDA_VISIBLE_DEVICES=$(get_cuda_devices $NUM_GPU $i)  torchrun --nproc_per_node=$NUM_GPU --node-rank 0 --rdzv-endpoint localhost:$((BASE_PORT + $i)) --nnodes=1  $@ --data.data_rank $i --data.data_world_size $N > logs/log$i.log 2>&1 &
-    child_pids+=($!)
+    if [ -n "$FLAG" ] && [ $i -eq $GPU_DEBUG ]; then
+        echo "Enter debug mode"
+        WANDB_MODE="offline" GLOBAL_UNIQUE_ID=$i GLOBAL_RANK=$i CUDA_VISIBLE_DEVICES=$(get_cuda_devices $NUM_GPU $i) debugpy-run -m torch.distributed.run -- --nproc_per_node=$NUM_GPU --node-rank 0 --rdzv-endpoint localhost:$((BASE_PORT + $i)) --nnodes=1  $@ --data.data_rank $i --data.data_world_size $N > logs/log$i.log 2>&1 &
+    else
+        WANDB_MODE=$([ $i -eq 0 ] && echo "online" || echo "offline") GLOBAL_UNIQUE_ID=$i GLOBAL_RANK=$i CUDA_VISIBLE_DEVICES=$(get_cuda_devices $NUM_GPU $i)  torchrun --nproc_per_node=$NUM_GPU --node-rank 0 --rdzv-endpoint localhost:$((BASE_PORT + $i)) --nnodes=1  $@ --data.data_rank $i --data.data_world_size $N > logs/log$i.log 2>&1 &
+        child_pids+=($!)
+    fi
 done
 
 # Start tail in background and store its PID separately
-tail -f logs/log0.log &
+tail -f logs/log$GPU_DEBUG.log &
 tail_pid=$!
 
 # Wait for the main processes only
