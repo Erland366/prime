@@ -5,6 +5,9 @@ import os
 from zeroband.utils.logging import get_logger
 from huggingface_hub import login, whoami
 
+def float_to_e_formatting(number: float) -> str:
+    return f"{number:.1e}"
+
 def is_debug_py():
     return "debugpy" in sys.modules
 

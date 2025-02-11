@@ -12,7 +12,9 @@ num_workers = 1
 dataset_name_or_paths = "datasets/fineweb-edu/data"
 
 [experiment]
-fsdp = true
+fsdp = false
+fused_optimizer = true
+reverse = false
 
 [optim]
 batch_size = 512
@@ -20,8 +22,8 @@ warmup_steps = 500
 total_steps = 1024
 
 [diloco]
-inner_steps = 10
+inner_steps = 100
 compression = "no"
 
 [optim.optim]
-lr = 4e-4
+lr = 5e-5

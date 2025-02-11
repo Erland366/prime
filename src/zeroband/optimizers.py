@@ -29,13 +29,18 @@ class SoapConfig(BaseConfig):
 OptimizersConfig: TypeAlias = AdamConfig | SoapConfig
 
 
-def get_optimizer(params: list[torch.nn.Parameter], config: OptimizersConfig) -> torch.optim.Optimizer:
+def get_optimizer(
+    params: list[torch.nn.Parameter], 
+    config: OptimizersConfig, 
+    experiment_config: "ExperimentConfig"
+) -> torch.optim.Optimizer:
     if isinstance(config, AdamConfig):
         return torch.optim.AdamW(
             params,
             lr=config.lr,
             weight_decay=config.weight_decay,
             betas=(config.betas1, config.betas2),
+            fused=experiment_config.fused_optimizer
         )
     elif isinstance(config, SoapConfig):
         return DistributedShampoo(

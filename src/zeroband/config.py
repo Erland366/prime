@@ -57,13 +57,19 @@ class MonitorConfig(BaseConfig):
 
 class ExperimentConfig(BaseConfig):
     fsdp: bool = True
+
+    reverse: bool = False
     inner_scheduler_type: Literal["continuous", "binned", None] = None
-    inner_scheduler_start: int = 20
-    inner_scheduler_end: int = 2000
+    inner_scheduler_lower_steps: int = 20
+    inner_scheduler_upper_steps: int = 2000
     inner_scheduler_bin_size: int | None = None 
     inner_scheduler_num_bins: int | None = None 
 
     weighted_pseudo_gradient: bool = False
+
+    # optimizer experiment
+    fused_optimizer: bool = False
+    outer_optimizer: Literal["adam", "nesterov_sgd"] = "nesterov_sgd"
 
 class Config(BaseConfig):
     # main config

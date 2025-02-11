@@ -1,47 +1,45 @@
-from typing import Protocol, Optional
-
-class InnerStepScheduler(Protocol):
-    def __init__(self): ...
-
-    def get_inner_steps(self): ...
-
-    def step(self): ...
-
 class ContinuousInnerStepScheduler:
     def __init__(
-        self, 
-        start_inner_steps: int, 
-        end_inner_steps: int, 
-        total_steps: int
+        self,
+        lower_steps: int,
+        upper_steps: int,
+        total_steps: int,
+        reverse: bool = False,
     ):
-        self.start_inner_steps = start_inner_steps
-        self.end_inner_steps = end_inner_steps
+        self.lower_steps = lower_steps
+        self.upper_steps = upper_steps
         self.total_steps = total_steps
         self.curr_step = 0
-        self.curr_inner_steps = self.start_inner_steps
-        self.increment = (end_inner_steps - start_inner_steps) / total_steps
+        self.curr_inner_steps = self.lower_steps
+        self.reverse = reverse
+        self.increment = (upper_steps - lower_steps) / total_steps
 
     def get_inner_steps(self):
-        return int(min(self.start_inner_steps + (self.increment * self.curr_step), self.end_inner_steps))
-        
+        if not self.reverse:
+            return int(min(max(self.lower_steps + (self.increment * self.curr_step), self.lower_steps), self.upper_steps))
+        else:
+            return int(max(min(self.lower_steps + (self.increment * self.curr_step), self.lower_steps), self.upper_steps))
+
     def step(self):
         self.curr_step += 1
-        self.current_inner_steps = self.get_inner_steps()
+        self.curr_inner_steps = self.get_inner_steps()
 
 class BinnedInnerStepScheduler:
     def __init__(
         self,
-        start_inner_steps: int,
-        end_inner_steps: int,
+        lower_steps: int,
+        upper_steps: int,
         total_steps: int,
         bin_size: int | None = None,
         num_bins: int | None = None,
+        reverse: bool = False,
     ):
-        self.start_inner_steps = start_inner_steps
-        self.end_inner_steps = end_inner_steps
+        self.lower_steps = lower_steps
+        self.upper_steps = upper_steps
         self.total_steps = total_steps
         self.curr_step = 0
-        self.curr_inner_steps = self.start_inner_steps
+        self.curr_inner_steps = self.lower_steps
+        self.reverse = reverse
 
         if bin_size is not None and num_bins is None:
             self.bin_size = bin_size
@@ -59,11 +57,14 @@ class BinnedInnerStepScheduler:
             raise ValueError("Either `bin_size` or `num_bins` must be provided.")
 
 
-        self.increment = (end_inner_steps - start_inner_steps) / (self.num_bins - 1) if self.num_bins > 1 else 0
+        self.increment = (upper_steps - lower_steps) / (self.num_bins - 1) if self.num_bins > 1 else 0
 
     def get_inner_steps(self):
         bin_index = self.curr_step // self.bin_size
-        return int(min(self.start_inner_steps + (self.increment * bin_index), self.end_inner_steps))
+        if not self.reverse:
+            return int(min(max(self.lower_steps + (self.increment * bin_index), self.lower_steps), self.upper_steps))
+        else:
+            return int(max(min(self.lower_steps + (self.increment * bin_index), self.lower_steps) , self.upper_steps))
 
     def step(self):
         self.curr_step += 1

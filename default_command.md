@@ -22,3 +22,15 @@ GLOO_SOCKET_IFNAME=lo GLOBAL_ADDR=localhost GLOBAL_RANK=0 GLOBAL_UNIQUE_ID=0 GLO
 ```
 ZERO_BAND_LOG_LEVEL=DEBUG ./scripts/simulate_multi_node_diloco.sh 2 1 src/zeroband/train.py  @configs/my_configs/without_fsdp.toml
 ```
+
+For debugging
+```
+ZERO_BAND_LOG_LEVEL=DEBUG ./scripts/simulate_multi_node_diloco.sh 2 1 --debug 0 src/zeroband/train.py @configs/my_configs/vanilla.toml
+```
+
+Running two run at the same time (differentiate the BASE_PORT)
+```
+GLOBAL_PORT=5565 BASE_PORT=10003 ZERO_BAND_LOG_LEVEL=DEBUG ./scripts/simulate_multi_node_diloco.sh 2 1 --debug 0 src/zeroband/train.py @configs/my_configs/vanilla.toml
+
+GLOBAL_PORT=5566 BASE_PORT=10004 ZERO_BAND_LOG_LEVEL=DEBUG ./scripts/simulate_multi_node_diloco.sh 2 1 src/zeroband/train.py @configs/my_configs/without_fsdp.toml
+```

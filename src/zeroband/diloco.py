@@ -64,6 +64,7 @@ class Diloco:
         experiment_config: "ExperimentConfig"
     ):
         self.config = config
+        self.experiment_config = experiment_config
 
         if config.compression == Compression.UINT8:
             from zeroband.C.collectives import ring_allreduce as _  # noqa: F401
@@ -76,7 +77,6 @@ class Diloco:
 
         self._init_offloaded_optimizer(model=model)
 
-        self.experiment_config = experiment_config
 
     @torch.no_grad()
     def _init_offloaded_optimizer(self, model):
@@ -103,17 +103,25 @@ class Diloco:
         global_pg = self.elastic_device_mesh.global_pg
         for i in range(self.config.retry_all_reduce):
             for param_offloaded, param in zip(self.param_list_cpu, model.parameters()):
-                if fake:
-                    param_offloaded.grad.to_local().zero_()
+                if self.experiment_config.fsdp:
+                    param_offloaded_grad = param_offloaded.grad.to_local()
+                    param_offloaded_data = param_offloaded.data.to_local()
+                    param_data = param.data.to_local()
                 else:
-                    param_offloaded.grad.to_local().copy_(param_offloaded.data.to_local())
+                    param_offloaded_grad = param_offloaded.grad
+                    param_offloaded_data = param_offloaded.data
+                    param_data = param.data
+
+                if fake:
+                    param_offloaded_grad.zero_()
+                else:
+                    param_offloaded_grad.copy_(param_offloaded_data)
                     if self.experiment_config.weighted_pseudo_gradient:
                         # Get world size
                         world_size = self.elastic_device_mesh.world_info.global_world_size
-                        self._logger.debug(f"Scale pseudo gradient to : 1 / {world_size}")
-                        param_offloaded.grad.to_local().sub_(param.data.to_local().to(param_offloaded.data.device) / world_size)
+                        param_offloaded_grad.sub_(param_data.to(param_offloaded_data.device) / world_size)
                     else:
-                        param_offloaded.grad.to_local().sub_(param.data.to_local().to(param_offloaded.data.device))
+                        param_offloaded_grad.sub_(param_data.to(param_offloaded_data.device))
             try:
                 self.offloaded_grad_flat_tensor.div_(world_size)
                 _collective_start_time = time.perf_counter()
@@ -158,7 +166,10 @@ class Diloco:
 
         self._logger.debug("sync inner model")
         for param_offloaded, param in zip(self.param_list_cpu, model.parameters()):
-            param.data.to_local().copy_(param_offloaded.data.to_local())
+            if self.experiment_config.fsdp:
+                param.data.to_local().copy_(param_offloaded.data.to_local())
+            else:
+                param.data.copy_(param_offloaded.data)
 
     @torch.no_grad()
     def get_offloaded_param(self, model: nn.Module) -> list[nn.Parameter]:
@@ -166,7 +177,7 @@ class Diloco:
         Offload the model parameters to cpu
         """
         param_items = [(name, param) for name, param in model.named_parameters() if param.requires_grad]
-        numels = sum(param.to_local().numel() for _, param in param_items)
+        numels = sum(param.to_local().numel() if isinstance(param, DTensor) else param.numel() for _, param in param_items)
 
         self.offloaded_data_flat_tensor = torch.empty((numels,), device="cpu", dtype=torch.float32)
         self.offloaded_grad_flat_tensor = torch.zeros((numels,), device="cpu", dtype=torch.float32)
@@ -182,26 +193,34 @@ class Diloco:
 
             # so here we copy the DTensor from gpu to cpu. The trick is that we need to recreate the DTensor with the correct
             # cpu devise mesh, otherwise we have a cpu DTensor with a cuda device mesh which will fail to do any communication
-            target = param.data.to_local().detach()
+            if isinstance(param.data, DTensor):
+                target = param.data.to_local().detach()
+            else:
+                target = param.data.detach()
             data_tensor = self.offloaded_data_flat_tensor.as_strided(target.size(), target.stride(), current_offset)
             grad_tensor = self.offloaded_grad_flat_tensor.as_strided(target.size(), target.stride(), current_offset)
             current_offset += data_tensor.numel()
             data_tensor.copy_(target)
 
-            offloaded_param = nn.Parameter(
-                DTensor.from_local(
-                    data_tensor,
+
+            if self.experiment_config.fsdp:
+                offloaded_param = nn.Parameter(
+                    DTensor.from_local(
+                        data_tensor,
+                        device_mesh=self.elastic_device_mesh.cpu_local_mesh,
+                        placements=param.data.placements,
+                    )
+                )
+
+                offloaded_param.grad = DTensor.from_local(
+                    grad_tensor,
                     device_mesh=self.elastic_device_mesh.cpu_local_mesh,
                     placements=param.data.placements,
                 )
-            )
-
-            offloaded_param.grad = DTensor.from_local(
-                grad_tensor,
-                device_mesh=self.elastic_device_mesh.cpu_local_mesh,
-                placements=param.data.placements,
-            )
-            # here we pre-allocate the grad DTensor on cpu.
+                # here we pre-allocate the grad DTensor on cpu.
+            else:
+                offloaded_param = data_tensor
+                offloaded_param.grad = grad_tensor
             offloaded_param.requires_grad = True
             offloaded_params.append(offloaded_param)
 

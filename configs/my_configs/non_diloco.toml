@@ -1,7 +1,8 @@
 name_model = "150M"
-project = "debug_150m_zero_band_without_fsdp"
+project = "150m_zeroband_adaptive"
 type_model = "llama2"
 metric_logger_type = "tensorboard,wandb"
+run_name = "non_diloco"
 
 [train]
 micro_bs = 16 # change this base on the gpu
@@ -11,15 +12,12 @@ num_workers = 1
 dataset_name_or_paths = "datasets/fineweb-edu/data"
 
 [experiment]
-fsdp = false
+fsdp = true
 
 [optim]
 batch_size = 512
 warmup_steps = 500
-total_steps = 8192
-
-[diloco]
-inner_steps = 10
+total_steps = 1024
 
 [optim.optim]
 lr = 4e-4
