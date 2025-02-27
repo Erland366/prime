@@ -1,24 +1,16 @@
 from __future__ import annotations
 import re
 import time
-from pydantic_config import BaseConfig
 import torch
 from torch import nn
-from zeroband.collectives import Compression, all_reduce
 from zeroband.comms import ElasticDeviceMesh
+from zeroband.collectives import Compression, all_reduce
 from zeroband.utils.world_info import get_world_info
-from zeroband.utils.logging import get_logger
+from zeroband.utils.logger import get_logger
+from zeroband.config import DilocoConfig
 import torch.distributed as dist
 from torch.distributed._tensor.api import DTensor
 from functools import lru_cache
-
-
-class DilocoConfig(BaseConfig):
-    outer_lr: float = 0.7
-    inner_steps: int
-    compression: Compression = Compression.NO
-
-    retry_all_reduce: int = 3
 
 
 @lru_cache(maxsize=None)
@@ -104,6 +96,7 @@ class Diloco:
         for i in range(self.config.retry_all_reduce):
             for param_offloaded, param in zip(self.param_list_cpu, model.parameters()):
                 if self.experiment_config.fsdp:
+                    assert isinstance(param_offloaded.grad, DTensor)
                     param_offloaded_grad = param_offloaded.grad.to_local()
                     param_offloaded_data = param_offloaded.data.to_local()
                     param_data = param.data.to_local()
@@ -111,7 +104,6 @@ class Diloco:
                     param_offloaded_grad = param_offloaded.grad
                     param_offloaded_data = param_offloaded.data
                     param_data = param.data
-
                 if fake:
                     param_offloaded_grad.zero_()
                 else:

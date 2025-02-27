@@ -8,9 +8,15 @@ reshard_after_forward = false
 
 [optim]
 batch_size = 512
-warmup_steps = 500
+warmup_steps = 278
 total_steps = 8192
 
-
 [optim.optim]
-lr = 4e-4
+lr = 0.003551730141097694
+betas1 = 0.9454835470717078
+betas2 = 0.9190488086654895
+weight_decay = 0.24530252977858977
+
+[data]
+seq_length = 1024
+dataset_name_or_paths = "datasets/fineweb-edu"

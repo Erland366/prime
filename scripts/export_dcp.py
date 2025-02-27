@@ -7,10 +7,11 @@ import torch
 from typing import Literal
 import torch.distributed.checkpoint as dcp
 from zeroband.models.llama import get_model
+from zeroband.config import resolve_env_vars
 from zeroband.checkpoint import ModelWrapper
 from zeroband.utils import get_module_signature
 from zeroband.train import Config
-from zeroband.utils.logging import get_logger
+from zeroband.utils.logger import get_logger
 from pydantic_config import parse_argv
 from transformers import AutoTokenizer
 import math
@@ -221,6 +222,7 @@ def main(config: ExportConfig):
 if __name__ == "__main__":
     logger = get_logger()
     config = ExportConfig(**parse_argv())
+    resolve_env_vars(config)
     logger.debug(f"config: {config.model_dump()}")
 
     main(config)

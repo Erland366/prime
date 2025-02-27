@@ -7,6 +7,8 @@ from faker import Faker
 from typing import Any, Protocol, Callable, Optional
 from pathlib import Path
 import importlib
+from typing import Any, Protocol
+import importlib.util
 
 def create_project_folder(folder_path):
     folder_path = Path(folder_path)
@@ -22,7 +24,7 @@ def create_project_folder(folder_path):
     folder_path.mkdir(parents=True, exist_ok=True)
 
 class MetricLogger(Protocol):
-    def __init__(self, project, config): ...
+    def __init__(self, project, logger_config): ...
 
     def log(self, metrics: dict[str, Any]): ...
 
@@ -97,16 +99,15 @@ class TensorboardMetricLogger:
     def finish(self):
         self._writer.close()
 
-class WandbMetricLogger:
-    def __init__(self, project, config, resume: bool, name: Optional[str] = None):
+class WandbMetricLogger(MetricLogger):
+    def __init__(self, project, logger_config, resume: bool):
         if importlib.util.find_spec("wandb") is None:
             raise ImportError("wandb is not installed. Please install it to use WandbMonitor.")
 
         import wandb
 
         wandb.init(
-            project=project, config=config, resume="auto" if resume else None,
-            name=name
+            project=project, config=logger_config, name=logger_config["config"]["run_name"], resume="auto" if resume else None
         )  # make wandb reuse the same run id if possible
 
     def log(self, metrics: dict[str, Any], step=None):
@@ -120,11 +121,11 @@ class WandbMetricLogger:
         wandb.finish()
 
 
-class DummyMetricLogger:
-    def __init__(self, project, config, *args, **kwargs):
+class DummyMetricLogger(MetricLogger):
+    def __init__(self, project, logger_config, *args, **kwargs):
         self.project = project
-        self.config = config
-        open(project, "a").close()  # Create an empty file at the project path
+        self.logger_config = logger_config
+        open(self.project, "a").close()  # Create an empty file to append to
 
         self.data = []
 

@@ -7,12 +7,14 @@
 # Llama 2 is licensed under the LLAMA 2 Community License,
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
-from zeroband.models.llama.model import AttnFnType, ModelArgs, Transformer
+from zeroband.config import Config
+from zeroband.models.llama.model import ModelArgs, Transformer
 
 __all__ = ["Transformer"]
 
 llama2_configs = {
     "debugmodel": ModelArgs(dim=256, n_layers=2, n_heads=8),
+    "70M": ModelArgs(dim=512, n_layers=6, n_heads=8),
     "150M": ModelArgs(dim=1024, n_layers=12, n_heads=16),  # todo(sami): double check this
     "271M": ModelArgs(dim=1024, n_layers=16, n_heads=8),
     "1B": ModelArgs(dim=2048, n_layers=18, n_heads=16),
@@ -81,23 +83,21 @@ llama3_configs = {
 
 
 def get_model(
-    name_model: str,
-    type_model: str,
+    config: Config,
     vocab_size: int,
-    seq_length: int,
-    attn_fn: AttnFnType,
 ) -> tuple[Transformer, ModelArgs]:
     """get the transformer model"""
 
-    if type_model == "llama2":
-        config = llama2_configs[name_model]
-    elif type_model == "llama3":
-        config = llama3_configs[name_model]
+    if config.type_model == "llama2":
+        model_config = llama2_configs[config.name_model]
+    elif config.type_model == "llama3":
+        model_config = llama3_configs[config.name_model]
     else:
-        raise ValueError(f"Model type {type_model} not supported")
+        raise ValueError(f"Model type {config.type_model} not supported")
 
-    config.vocab_size = vocab_size
-    config.max_seq_len = seq_length
-    config.attn_fn = attn_fn
+    model_config.vocab_size = vocab_size
+    model_config.max_seq_len = config.data.seq_length
+    model_config.attn_fn = config.train.attn_fn
+    model_config.fused_linear_ce = config.train.fused_linear_ce
 
-    return Transformer(config), config
+    return Transformer(model_config), model_config

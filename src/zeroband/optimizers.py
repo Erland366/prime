@@ -1,6 +1,9 @@
-from typing import Literal, TypeAlias
-from pydantic_config import BaseConfig
+from typing import Iterable
+
 import torch
+import torch.distributed.fsdp
+import torch.distributed.tensor
+
 from distributed_shampoo import (
     DefaultEigenvalueCorrectedShampooConfig,
     DistributedShampoo,
@@ -8,58 +11,51 @@ from distributed_shampoo import (
     ShampooPT2CompileConfig,
 )
 
-class AdamConfig(BaseConfig):
-    type: Literal["adam"] = "adam" # the literal is used to distinguish between the different optimizers configuration in the union type
-    lr: float = 4e-4
-    weight_decay: float = 0.1
-    betas1: float = 0.9
-    betas2: float = 0.95
-
-class SoapConfig(BaseConfig):
-    type: Literal["soap"] = "soap"
-    lr: float = 4e-4
-    weight_decay: float = 1e-05
-    betas1: float = 0.9
-    betas2: float = 0.95
-
-    max_preconditioner_dim: int = 8192
-    precondition_frequency: int = 100
-
-
-OptimizersConfig: TypeAlias = AdamConfig | SoapConfig
+from zeroband.config import Config, AdamConfig, SoapConfig, OptimizersConfig
 
 
 def get_optimizer(
-    params: list[torch.nn.Parameter], 
-    config: OptimizersConfig, 
-    experiment_config: "ExperimentConfig"
+    config: Config, 
+    params: Iterable[torch.nn.Parameter],
+    experiment_config: "ExperimentConfig",
 ) -> torch.optim.Optimizer:
-    if isinstance(config, AdamConfig):
-        return torch.optim.AdamW(
+    """
+    Obtain the optimizer for the model.
+    """
+
+    _config: OptimizersConfig = config.optim.optim
+
+    if isinstance(_config, AdamConfig):
+        opt = torch.optim.AdamW(
             params,
-            lr=config.lr,
-            weight_decay=config.weight_decay,
-            betas=(config.betas1, config.betas2),
+            lr=_config.lr,
+            weight_decay=_config.weight_decay,
+            betas=(_config.betas1, _config.betas2),
             fused=experiment_config.fused_optimizer
+>>>>>>> d57965b04574262815a174246707afd9615eed0c
         )
-    elif isinstance(config, SoapConfig):
-        return DistributedShampoo(
+    elif isinstance(_config, SoapConfig):
+        opt = DistributedShampoo(
             params,
-            lr=config.lr,
-            betas=(config.betas1, config.betas2),
+            lr=_config.lr,
+            betas=(_config.betas1, _config.betas2),
             epsilon=1e-12,
-            weight_decay=config.weight_decay,
-            max_preconditioner_dim=config.max_preconditioner_dim,
-            precondition_frequency=config.precondition_frequency,
+            weight_decay=_config.weight_decay,
+            max_preconditioner_dim=_config.max_preconditioner_dim,
+            precondition_frequency=_config.precondition_frequency,
             use_decoupled_weight_decay=True,
             # This can also be set to `DefaultSOAPConfig` which uses QR decompositions, hence is
             # less expensive and might thereby allow for a smaller `precondition_frequency`.
             preconditioner_config=DefaultEigenvalueCorrectedShampooConfig,
             distributed_config=FullyShardShampooConfig(),
-            shampoo_pt2_compile_config=ShampooPT2CompileConfig(enable_shampoo_pt2_dynamic_shape=False),
+            shampoo_pt2_compile_config=ShampooPT2CompileConfig(
+                enable_shampoo_pt2_dynamic_shape=False
+            ),
         )
     else:
-        raise ValueError(f"Unknown optimizer {config.optimizer}")
+        raise ValueError(f"Unknown optimizer {_config.optimizer}")
+
+    return opt
 
 
 __all__ = ["OptimizersConfig", "get_optimizer"]

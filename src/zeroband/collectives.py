@@ -1,7 +1,8 @@
-from enum import Enum
 from typing import Callable, Optional, TypeAlias
 import torch
 import torch.distributed as dist
+
+from zeroband.config import Compression
 
 AllReduceFunc: TypeAlias = Callable[
     [torch.Tensor, dist.ReduceOp, Optional[dist.ProcessGroup], Optional[torch.dtype]], None
@@ -10,7 +11,7 @@ AllReduceFunc: TypeAlias = Callable[
 
 def gloo_all_reduce(
     tensor: torch.Tensor,
-    op: dist.ReduceOp = dist.ReduceOp.SUM,
+    op: dist.ReduceOp = dist.ReduceOp.SUM, # type: ignore (defined weird)
     group: Optional[dist.ProcessGroup] = None,
 ) -> None:
     """Wrap gloo all reduce"""
@@ -27,15 +28,10 @@ def gloo_all_reduce(
     dist.all_reduce(tensor, op, group=group)
 
 
-class Compression(Enum):
-    NO = "no"
-    UINT8 = "uint8"
-
-
 def all_reduce(
     compression: Compression,
     tensor: torch.Tensor,
-    op: dist.ReduceOp = dist.ReduceOp.SUM,
+    op: dist.ReduceOp = dist.ReduceOp.SUM, # type: ignore
     group: Optional[dist.ProcessGroup] = None,
 ) -> None:
     if compression == Compression.UINT8:
@@ -56,7 +52,7 @@ BUFFER_COUNT = 2
 
 def ring_allreduce_py(
     tensor: torch.Tensor,
-    op: dist.ReduceOp = dist.ReduceOp.SUM,
+    op: dist.ReduceOp = dist.ReduceOp.SUM, # type: ignore
     group: Optional[dist.ProcessGroup] = None,
     transfer_dtype: Optional[torch.dtype] = None,
     quantization_func: Optional[Callable] = None,

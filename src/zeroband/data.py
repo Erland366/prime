@@ -2,12 +2,14 @@ from dataclasses import dataclass, asdict
 import random
 from typing import Any, Generator, Optional, List, Dict, TypedDict, Union
 import functools
+import threading
 
-from pydantic_config import BaseConfig
-from zeroband.utils.logging import get_logger
+from zeroband.models.llama.model import create_block_mask_from_seqlens
+from zeroband.utils.logger import get_logger
+from zeroband.utils.world_info import get_world_info
+from zeroband.config import DataConfig
 
 import torch
-from torch.utils.data import DataLoader
 from torch.utils.data import IterableDataset, Dataset
 from torchdata.stateful_dataloader import StatefulDataLoader
 from torch.distributed.checkpoint.stateful import Stateful
@@ -18,25 +20,6 @@ from transformers import PreTrainedTokenizer
 
 
 TEST_VOCAB_SIZE = 1024
-
-# TODO sami: make sure the init of the model is the same on all rank
-
-logger = get_logger(__name__)
-
-
-class DataConfig(BaseConfig):
-    dataset_name_or_paths: str = "datasets/fineweb-edu"
-    val_dataset_name_or_paths: Optional[str] = None
-    seq_length: int = 1024
-    fake: bool = False
-    num_workers: int = 4
-    max_train_samples: Optional[int] = None
-    max_eval_samples: Optional[int] = None
-    dataset_ratio: Optional[str] = None
-    data_rank: Optional[int] = None
-    data_world_size: Optional[int] = None
-    reverse_data_files: bool = False
-    split_by_data_rank: bool = True
 
 
 class FakeTokenizedDataset(IterableDataset):
@@ -176,7 +159,7 @@ class ParquetDataset(IterableDataset, Stateful):
         worker_info = torch.utils.data.get_worker_info()
         if worker_info is not None:
             if worker_info.num_workers > len(self.arg_files):
-                logger.warning(
+                get_logger().warning(
                     f"dataloader rank {worker_info.id} Number of workers {worker_info.num_workers} is greater than the number of files {len(self.arg_files)}"
                 )
                 self.state = PQDatasetState(
@@ -242,7 +225,7 @@ class InterleaveDataset(IterableDataset, Stateful):
     The state can be saved and restored. Under the hood we just fast forward the random generator to the current position.
     """
 
-    def __init__(self, datasets: List[ParquetDataset], probabilities: Optional[List[float]] = None, seed: int = 42):
+    def __init__(self, datasets: List[ParquetDataset], probabilities: List[float], seed: int = 42):
         assert len(datasets) > 0, "At least one dataset is required"
         assert len(datasets) == len(probabilities), "The number of datasets and probabilities must be the same"
 
@@ -254,14 +237,13 @@ class InterleaveDataset(IterableDataset, Stateful):
                 self.datasets.append(dataset)
                 self.probabilities.append(prob)
             else:
-                logger.warning(f"Dataset {dataset} is empty. Skipping.")
+                get_logger().warning(f"Dataset {dataset} is empty. Skipping.")
 
         self.state = InterleaveDatasetState(current_index=0, seed=seed)
         self._init_random_state()
 
     def _init_random_state(self):
         """Initialize random generator and advance to current position"""
-        ...
         self.random_generator = random.Random(self.state.seed)
         # Advance the RNG to the current position
         for _ in range(self.state.current_index):
@@ -294,13 +276,130 @@ class InterleaveDataset(IterableDataset, Stateful):
         self._init_random_state()
 
 
+class PrefetchDataLoader(StatefulDataLoader):
+    """
+    This class is a wrapper around a dataloader that prefetches the next batch asynchronously on another thread.
+    This is useful to hide the latency of transferring the batch to GPU.
+    We can't integrate this into the StatefulDataloader's collate_fn() because it runs in another process.
+    We're also using it to hide the latency of torch compiling FlexAttention block masks.
+    """
+
+    def __init__(self, original_dataloader: StatefulDataLoader, data_config: DataConfig):
+        self.config = data_config
+        self.original_dataloader = original_dataloader
+        self._prefetch_iterator = None
+
+    def __iter__(self):
+        if self._prefetch_iterator is not None:
+            return self._prefetch_iterator
+
+        self._prefetch_iterator = self._PrefetchIterator(
+            self.original_dataloader,
+            self.config,
+        )
+        return self._prefetch_iterator
+
+    def state_dict(self):
+        if self._prefetch_iterator is not None:
+            self._prefetch_iterator._await_prefetch()
+
+        # Only keep around one or the other
+        return {
+            'dataloader_state': None if self._prefetch_iterator else self.original_dataloader.state_dict(),
+            '_prefetch_iterator': None if self._prefetch_iterator is None else self._prefetch_iterator.state_dict(),
+        }
+
+    def load_state_dict(self, state_dict):
+        if state_dict['dataloader_state'] is not None:
+            self.original_dataloader.load_state_dict(state_dict['dataloader_state'])
+        if state_dict['_prefetch_iterator'] is not None:
+            self._prefetch_iterator = self._PrefetchIterator(self.original_dataloader, self.config)
+
+    class _PrefetchIterator(Stateful):
+        def __init__(self, original_dataloader: StatefulDataLoader, config: DataConfig):
+            self.dataloader_iter = iter(original_dataloader)
+            self.config = config
+            self.ready_batch = None
+            self.thread = None
+
+            # Immediately transfer first batch async.
+            self._prefetch_next()
+
+        def state_dict(self) -> Dict[str, Any]:
+            self._await_prefetch()
+            return {
+                'dataloader_iter': self.dataloader_iter.state_dict(),
+                'ready_batch': self.ready_batch
+            }
+
+        def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+            self.dataloader_iter = state_dict['dataloader_iter']
+            self.ready_batch = state_dict['ready_batch']
+
+        def _prefetch_next(self):
+            def _task() -> None:
+                # NOTE: Each thread gets its own threadlocal CUDA context and has to reset the device.
+                local_rank = get_world_info().local_rank
+                torch.cuda.set_device(local_rank)
+
+                # Grab batch or return sentinel
+                try:
+                    batch = next(self.dataloader_iter)
+                except StopIteration:
+                    self.ready_batch = StopIteration
+                    return None
+
+                # Transfer to CUDA asynchronously and create block mask in another cuda stream
+                newstream = torch.cuda.Stream(local_rank)
+                with torch.cuda.stream(newstream): #type: ignore (cuda stream is a cuda stream :) )
+                    input_ids = batch["input_ids"].to("cuda", non_blocking=True)
+                    labels = batch["labels"].to("cuda", non_blocking=True)
+
+                    # Create block mask if needed
+                    block_mask = None
+                    if self.config.sequence_packing:
+                        seqlens = batch.get("seqlens")
+                        if seqlens is not None:
+                            seqlens = [s.to("cuda", non_blocking=True) for s in seqlens]
+                            block_mask = create_block_mask_from_seqlens(seqlens)
+
+                # Construct and return processed batch.
+                self.ready_batch = {
+                    "input_ids": input_ids,
+                    "labels": labels,
+                    "block_mask": block_mask
+                }
+                return None
+
+            self.thread = threading.Thread(target=_task)
+            self.thread.start()
+
+        def __next__(self):
+            self._await_prefetch()
+            if self.ready_batch is StopIteration:
+                raise StopIteration
+
+            batch = self.ready_batch
+            self.ready_batch = None
+
+            self._prefetch_next()
+            return batch
+
+        def _await_prefetch(self):
+            if self.thread is not None and self.thread.is_alive():
+                self.thread.join()
+                self.thread = None
+
+        def __del__(self):
+            self._await_prefetch()
+
 def get_dataloader(
     tokenizer,
     world_size: int,
     rank: int,
     batch_size: int,
     data_config: DataConfig,
-) -> DataLoader:
+) -> StatefulDataLoader:
     if data_config.fake:
         train_dataset = FakeTokenizedDataset(data_config.seq_length, TEST_VOCAB_SIZE)
     else:
@@ -309,13 +408,13 @@ def get_dataloader(
         )
 
     dataset = SequencePackingDataSet(train_dataset, data_config.seq_length, eos_token=tokenizer.eos_token_id)
-
-    return StatefulDataLoader(
+    mp_batch_dataloader = StatefulDataLoader(
         dataset,
         batch_size=batch_size,
         collate_fn=collate_fn,
         num_workers=data_config.num_workers,
     )
+    return PrefetchDataLoader(mp_batch_dataloader, data_config)
 
 
 @functools.lru_cache(maxsize=None)
@@ -328,7 +427,7 @@ def _get_datafiles(path: str, name: Optional[str] = None, split: str = "train") 
     builder_config = _get_ds_config_dict(path=path, name=name)
     if name is None or len(name) == 0:
         if "default" not in builder_config:
-            logger.warning(f"Default config not found for {path}. Using first config.")
+            get_logger().warning(f"Default config not found for {path}. Using first config.")
             name = next(iter(builder_config.keys()))
         else:
             name = "default"
@@ -354,11 +453,11 @@ def _load_datasets(
     probabilities: Optional[List[float]] = None,
     reverse_data_files: bool = False,
 ) -> InterleaveDataset:
-    logger.debug(dataset_names)
+    get_logger().debug(dataset_names)
     ds_args = []
     for _ds in dataset_names.split(","):
         _ds_name, _, _ds_config = _ds.partition(":")
-        _ds_args = {"path": _ds_name}
+        _ds_args: dict[str, Any] = {"path": _ds_name}
         if _ds_config:
             _ds_args["name"] = _ds_config
         _data_files = _get_datafiles(_ds_name, _ds_config, split)
@@ -372,7 +471,7 @@ def _load_datasets(
 
     # logger.debug(f"Datasets ({split}):\n" + "\n".join(map(_nice_print, ds_args)))
     # logger.debug(f"Probabilities: {probabilities}")
-    logger.debug(f"Loading datasets{' in streaming mode' if streaming else ''}")
+    get_logger().debug(f"Loading datasets{' in streaming mode' if streaming else ''}")
     datasets = []
     for ds_arg in ds_args:
         # logger.debug(f"Loading dataset: {ds_arg['data_files']}")
@@ -384,7 +483,7 @@ def _load_datasets(
     else:
         ds = datasets[0]
 
-    logger.info(f"Loaded datasets ({split})")
+    get_logger().info(f"Loaded datasets ({split})")
     return ds
 
 
@@ -417,7 +516,7 @@ def load_all_datasets(
         split_world_size = world_size
 
 
-    logger.info("Loading Train dataset(s)")
+    get_logger().info("Loading Train dataset(s)")
 
     ds = _load_datasets(
         dataset_names=data_config.dataset_name_or_paths,
@@ -429,6 +528,6 @@ def load_all_datasets(
         tokenizer=tokenizer,
     )
 
-    logger.info(f"Train dataset:\n{ds}")
+    get_logger().info(f"Train dataset: {ds}")
 
     return ds
