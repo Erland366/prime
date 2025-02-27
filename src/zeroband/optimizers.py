@@ -32,7 +32,6 @@ def get_optimizer(
             weight_decay=_config.weight_decay,
             betas=(_config.betas1, _config.betas2),
             fused=experiment_config.fused_optimizer
->>>>>>> d57965b04574262815a174246707afd9615eed0c
         )
     elif isinstance(_config, SoapConfig):
         opt = DistributedShampoo(

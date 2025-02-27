@@ -1,14 +1,14 @@
+import importlib
+import importlib.util
+import json
 import os
 import pickle
 import random
-import json
+from pathlib import Path
+from typing import Any, Callable, Optional, Protocol
 
 from faker import Faker
-from typing import Any, Protocol, Callable, Optional
-from pathlib import Path
-import importlib
-from typing import Any, Protocol
-import importlib.util
+
 
 def create_project_folder(folder_path):
     folder_path = Path(folder_path)

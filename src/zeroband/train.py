@@ -1,37 +1,29 @@
 import os
 import time
-from dotenv import load_dotenv
-from multiprocessing.process import _children
 from contextlib import nullcontext
+from multiprocessing.process import _children  # type: ignore
+from typing import TYPE_CHECKING
 
 import torch
-from pydantic_config import parse_argv
+import torch.distributed as dist
+from dotenv import load_dotenv
 from einops import rearrange
+from pydantic_config import parse_argv
+from torch import autocast
+from torch.amp import GradScaler
+from torch.autograd.profiler import _children, record_function
+from torch.distributed._composable.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy, fully_shard  # type: ignore
 from torch.nn import functional as F
-
 from transformers import AutoTokenizer
 
-from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
-from torch.amp import GradScaler
-from torch import autocast
-
-import torch.distributed as dist
 from zeroband import utils
-from zeroband.collectives import Compression
-from zeroband.diloco import Diloco
-from typing import TYPE_CHECKING
-from multiprocessing.process import _children  # type: ignore
-
-import torch
-import torch.distributed as dist
-from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy, CPUOffloadPolicy  # type: ignore
-from torch.autograd.profiler import record_function, _children
-
 from zeroband.checkpoint import CkptManager, TrainingProgress
+from zeroband.collectives import Compression
 from zeroband.comms import ElasticDeviceMesh
 from zeroband.config import Config, resolve_env_vars
 from zeroband.data import TEST_VOCAB_SIZE, get_dataloader
 from zeroband.diloco import Diloco
+from zeroband.inner_scheduler import BinnedInnerStepScheduler, ContinuousInnerStepScheduler
 from zeroband.loss import compute_cross_entropy_loss
 from zeroband.lr_scheduler import get_scheduler
 from zeroband.models.llama import get_model
@@ -40,41 +32,27 @@ from zeroband.utils import (
     FakeTokenizer,
     PerfCounter,
     get_module_signature,
-    get_optimizer_signature,
-    get_tensor_list_signature,
-    get_peak_flops,
-    get_num_params,
     get_num_flop_per_token,
+    get_num_params,
+    get_optimizer_signature,
+    get_peak_flops,
+    get_tensor_list_signature,
 )
-from zeroband.utils.helpers import float_to_e_formatting, login_hf, login_wandb, is_debug_py
 from zeroband.utils.activation_ckpt import apply_ac_ckpt
-from zeroband.data import TEST_VOCAB_SIZE, get_dataloader
+from zeroband.utils.helpers import float_to_e_formatting, is_debug_py, login_hf, login_wandb
+from zeroband.utils.logger import get_logger
+from zeroband.utils.logging import get_logger
 from zeroband.utils.metric_logger import (
-    MetricLogger, 
-    WandbMetricLogger, 
-    TensorboardMetricLogger, 
     CombineMetricLogger,
     DummyMetricLogger,
+    MetricLogger,
+    TensorboardMetricLogger,
+    WandbMetricLogger,
 )
 from zeroband.utils.monitor import HttpMonitor
-from zeroband.models.llama import get_model
 from zeroband.utils.profiler import MemoryProfiler
-from zeroband.utils.world_info import get_world_info
-from zeroband.utils.logging import get_logger
-from zeroband.checkpoint import CkptManager, TrainingProgress
-from zeroband.lr_scheduler import get_scheduler
-from zeroband.inner_scheduler import ContinuousInnerStepScheduler, BinnedInnerStepScheduler
-
-from dotenv import load_dotenv
-from zeroband.utils.metric_logger import MetricLogger, WandbMetricLogger, DummyMetricLogger
-from zeroband.utils.activation_ckpt import apply_ac_ckpt
-from zeroband.utils.profiler import MemoryProfiler
-from zeroband.utils.world_info import get_world_info
-from zeroband.utils.logger import get_logger
 from zeroband.utils.stopwatch import Stopwatch
-
-from transformers import AutoTokenizer
-from pydantic_config import parse_argv
+from zeroband.utils.world_info import get_world_info
 
 load_dotenv()
 
