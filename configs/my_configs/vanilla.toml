@@ -22,7 +22,7 @@ warmup_steps = 500
 total_steps = 1024
 
 [diloco]
-inner_steps = 100
+inner_steps = 20
 compression = "no"
 
 [optim.optim]

@@ -8,6 +8,7 @@ import torch
 from pydantic_config import parse_argv
 from einops import rearrange
 from torch.nn import functional as F
+from torch import multiprocessing as mp
 
 from transformers import AutoTokenizer
 
@@ -24,6 +25,7 @@ from zeroband.loss import cross_entropy_max_z_loss
 from zeroband.models.llama.model import create_block_mask_from_seqlens
 from zeroband.config import Config  #, MemoryProfilerConfig
 from zeroband.optimizers import get_optimizer
+from zeroband.parameter_server import ParameterServer
 
 from zeroband.utils import (
     FakeTokenizer,
@@ -95,7 +97,11 @@ def log_hash_training_state(
             metric_logger.log(metrics)
 
 
-def train(config: Config):
+def train(config: Config, update_queue, model_queue):
+    world_info = get_world_info()
+    logger = get_logger()
+    torch.cuda.set_device(world_info.local_rank)
+
     # batch_size is the total batch size for all GPUs
     assert config.optim.batch_size % world_info.local_world_size == 0
     batch_size = config.optim.batch_size // world_info.local_world_size
@@ -162,7 +168,6 @@ def train(config: Config):
         enable=config.diloco is not None, live_recovery_rank_src=config.ckpt.live_recovery_rank_src
     )
     if config.experiment.fsdp:
-
         mp_policy = MixedPrecisionPolicy(
             param_dtype=torch.bfloat16, reduce_dtype=torch.float32 if config.train.reduce_fp32 else None
         )
@@ -246,6 +251,7 @@ def train(config: Config):
 
     # Set run name for easier tracking
     if config.run_name is not None:
+        config.run_name += "-Async"
         config.run_name += f"-is_{config.diloco.inner_steps}"
         config.run_name += f"-lr{float_to_e_formatting(config.optim.optim.lr)}"
 
@@ -305,7 +311,15 @@ def train(config: Config):
     num_inner_steps = config.diloco.inner_steps if config.diloco is not None else 1
     perf_counter = PerfCounter(window_size=10)
 
-    logger.info("starting training")
+    logger.info("starting training - Worker Process")
+
+    initial_data_from_ps = model_queue.get()
+    server_model_state = initial_data_from_ps["server_model_state"]
+    outer_params_from_ps = initial_data_from_ps["outer_params"]
+    model.load_state_dict(outer_params_from_ps)
+
+    if diloco is not None:
+        diloco.load_
 
     need_live_recovery = config.ckpt.live_recovery_rank_src is not None
     while True:
@@ -573,11 +587,65 @@ if __name__ == "__main__":
     # config.train.memory_profiler = MemoryProfilerConfig(snapshot_dir="logs/", freq=1)
     logger.debug(f"config: {config.model_dump()}")
 
+    update_queue = mp.Queue()
+    model_queue = mp.Queue()
+
+    # Server model still resides on CPU
+    server_model, model_config = get_model(
+        config.name_model,
+        config.type_model,
+        vocab_size=len(AutoTokenizer.from_pretrained("keeeeenw/MicroLlama", use_fast=True)) if config.name_model != "debugmodel" or not config.data.fake else TEST_VOCAB_SIZE,
+        seq_length=config.data.seq_length,
+        attn_fn=config.train.attn_fn,
+    )
+
+    # Needs to be in shared memory, this automatically happens if we move the model to GPU
+    server_model.share_memory()
+    server_optimizer = get_optimizer(server_model.parameters(), config.optim.optim, config.experiment)
+    initial_optimizer_state = server_optimizer.state_dict()
+
+    ps = ParameterServer(
+        server_model=server_model,
+        optimizer_state=initial_optimizer_state,
+        update_queue=update_queue,
+        model_queue=model_queue,
+        outer_opt_name=config.optim.optim.name,
+        # TODO: Just send all config at this point
+        outer_opt_kwargs=config.experiment,
+        diloco_config=config.diloco,
+        elastic_device_mesh_config=config.elastic_device_mesh,
+        num_workers=dist.get_world_size(),
+    )   
+    ps_process = mp.Process(target=ps.run)
+    ps_process.start()
+    logger.info("[Main Process] DiLoCo Parameter Server process started.")
+
+    elastic_device_mesh_init_ps = ElasticDeviceMesh(**elastic_device_mesh_config_ps)
+    diloco_init_ps = Diloco(config.diloco, server_model, elastic_device_mesh_init_ps, config.experiment)
+    initial_outer_params = [p.data.clone().cpu() for p in diloco_init_ps.param_list_cpu]
+
+    initial_data_to_worker = {
+        "server_model_state": server_model.state_dict(),
+        "outer_params": initial_outer_params
+    }
+    model_queue.put(initial_data_to_worker) # Send initial data to worker
+
     try:
-        train(config)
+        train_process = mp.Process(target=train, args=(config, update_queue, model_queue))
+        train_process.start()
+        logger.info("[Main Process] Worker process started.")
+        train_process.join()
+        logger.info("[Main Process] Worker process finished.")
     except Exception as e:
-        # Subprocesses can prevent the main process from exiting, so we need to terminate them
         for p in _children:
             p.terminate()
-
         raise e
+    finally:
+        logger.info("[Main Process] Sending STOP signal to Parameter Server")
+        update_queue.put("STOP")
+        ps_process.join()
+        logger.info("[Main Process] Parameter Server process stopped")
+        update_queue.close()
+        model_queue.close()
+
+    logger_main.info("Training finished, exiting ...")

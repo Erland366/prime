@@ -36,7 +36,7 @@ class Diloco:
 
     It handles the outer loop as well as the inter node communication.
 
-    There is no VRAM overhead with this implementation as the model is outer optimizer is offloaded to cpu.
+    There is no VRAM overhead with this implementation as the model's outer optimizer is offloaded to cpu.
     All reduce communication are also done on cpu using GLOO.
 
     Example usage:
@@ -170,6 +170,7 @@ class Diloco:
                 param.data.to_local().copy_(param_offloaded.data.to_local())
             else:
                 param.data.copy_(param_offloaded.data)
+
 
     @torch.no_grad()
     def get_offloaded_param(self, model: nn.Module) -> list[nn.Parameter]:

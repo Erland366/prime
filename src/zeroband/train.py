@@ -17,6 +17,7 @@ from torch import autocast
 
 import torch.distributed as dist
 from zeroband import utils
+from zeroband.collectives import Compression
 from zeroband.diloco import Diloco
 from zeroband.comms import ElasticDeviceMesh
 from zeroband.loss import cross_entropy_max_z_loss
@@ -251,16 +252,26 @@ def train(config: Config):
 
         if config.experiment.inner_scheduler_type is not None:
             config.run_name += f"-{config.experiment.inner_scheduler_type}"
-            config.run_name += f"-{config.experiment.inner_scheduler_start}"
-            config.run_name += f"_{config.experiment.inner_scheduler_end}"
+            config.run_name += f"-{config.experiment.inner_scheduler_lower_steps}"
+            config.run_name += f"_{config.experiment.inner_scheduler_upper_steps}"
 
         if config.experiment.fsdp is False:
             config.run_name += f"-nonfsdp"
         else:
             config.run_name += f"-fsdp"
 
-        if config.experiment.reverse is False:
+        if config.experiment.reverse:
             config.run_name += f"-R"
+
+        if config.diloco.compression == Compression.UINT8:
+            config.run_name += f"-Ci8"
+        else:
+            config.run_name += f"-Cf32"
+
+
+
+
+
     
     if world_info.rank == 0:
         if not is_debug_py():

@@ -12,10 +12,10 @@ num_workers = 1
 dataset_name_or_paths = "datasets/fineweb-edu/data"
 
 [experiment]
-fsdp = true
+fsdp = false
 inner_scheduler_type = "binned"
-inner_scheduler_start = 10
-inner_scheduler_end = 2000
+inner_scheduler_lower_steps = 10
+inner_scheduler_upper_steps = 2000
 inner_scheduler_bin_size = 10
 
 [optim]
@@ -25,6 +25,7 @@ total_steps = 1024
 
 [diloco]
 inner_steps = 10
+compression = "no"
 
 [optim.optim]
-lr = 4e-4
+lr = 5e-5
