@@ -31,14 +31,16 @@ class MetricLogger(Protocol):
     def finish(self): ...
 
 class CombineMetricLogger:
-    def __init__(self, project, config, resume: bool, name: Optional[str], logger_cls: list[str]):
+    def __init__(self, project, logger_config, resume: bool, logger_cls: list[str]):
         assert isinstance(logger_cls, list)
         self._logger_cls = []
 
+        name = logger_config["config"]["run_name"]
         if name is None:
             random_name = Faker().name()
             random_int = random.randint(0, 100)
             name = random_name.lower().replace(" ", "_") + str(random_int)
+            logger_config["config"]["run_name"] = name
 
         for metric_logger_type in logger_cls:
             if metric_logger_type == "wandb":
@@ -49,9 +51,8 @@ class CombineMetricLogger:
                 logger_cls = DummyMetricLogger
             metric_logger = logger_cls(
                 project=project,
-                config=config,
+                logger_config=logger_config,
                 resume=resume,
-                name=name
             )
             self._logger_cls.append(metric_logger)
 
@@ -64,7 +65,7 @@ class CombineMetricLogger:
             self._logger_cls[i].finish()
 
 class TensorboardMetricLogger:
-    def __init__(self, project, config, resume: bool, name: Optional[str] = None):
+    def __init__(self, project, logger_config, resume: bool):
         if importlib.util.find_spec("tensorboard") is None:
             raise ImportError("wandb is not installed. Please install it to use WandbMonitor.")
 
@@ -74,10 +75,7 @@ class TensorboardMetricLogger:
         self._step = 0
 
         # Save config to name
-        if name is None:
-            random_name = Faker().name()
-            random_int = random.randint(0, 100)
-            name = random_name.lower().replace(" ", "_") + str(random_int)
+        name = logger_config["config"]["run_name"]
 
         create_project_folder(os.path.join(base_dir, project, name))
 

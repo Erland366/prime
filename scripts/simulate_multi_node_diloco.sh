@@ -96,6 +96,8 @@ do
 done
 
 # Start tail in background and store its PID separately
+echo "Tailing log file: logs/log$GPU_DEBUG.log"
+ls -l logs/log$GPU_DEBUG.log
 tail -f logs/log$GPU_DEBUG.log &
 tail_pid=$!
 

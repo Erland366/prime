@@ -11,7 +11,7 @@ from einops import rearrange
 from pydantic_config import parse_argv
 from torch import autocast
 from torch.amp import GradScaler
-from torch.autograd.profiler import _children, record_function
+from torch.autograd.profiler import record_function
 from torch.distributed._composable.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy, fully_shard  # type: ignore
 from torch.nn import functional as F
 from transformers import AutoTokenizer
@@ -41,7 +41,7 @@ from zeroband.utils import (
 from zeroband.utils.activation_ckpt import apply_ac_ckpt
 from zeroband.utils.helpers import float_to_e_formatting, is_debug_py, login_hf, login_wandb
 from zeroband.utils.logger import get_logger
-from zeroband.utils.logging import get_logger
+from zeroband.utils.logger import get_logger
 from zeroband.utils.metric_logger import (
     CombineMetricLogger,
     DummyMetricLogger,
@@ -49,7 +49,6 @@ from zeroband.utils.metric_logger import (
     TensorboardMetricLogger,
     WandbMetricLogger,
 )
-from zeroband.utils.monitor import HttpMonitor
 from zeroband.utils.profiler import MemoryProfiler
 from zeroband.utils.stopwatch import Stopwatch
 from zeroband.utils.world_info import get_world_info
@@ -170,10 +169,11 @@ def train(config: Config):
             apply_ac_ckpt(model, num)
 
 
+
+        elastic_device_mesh = ElasticDeviceMesh(
+            enable=config.diloco is not None, live_recovery_rank_src=config.ckpt.live_recovery_rank_src
+        )
         if config.experiment.fsdp:
-            elastic_device_mesh = ElasticDeviceMesh(
-                enable=config.diloco is not None, live_recovery_rank_src=config.ckpt.live_recovery_rank_src
-            )
 
             mp_policy = MixedPrecisionPolicy(
                 param_dtype=torch.bfloat16, reduce_dtype=torch.float32 if config.train.reduce_fp32 else None
@@ -210,9 +210,9 @@ def train(config: Config):
 
     # Setup optimizers
     with sw.record_block("Optimizer Setup"):
-        inner_optimizer = get_optimizer(config, model.parameters())
+        inner_optimizer = get_optimizer(config, model.parameters(), config.experiment)
 
-        diloco = Diloco(config.diloco, model, elastic_device_mesh) if config.diloco is not None else None
+        diloco = Diloco(config.diloco, model, elastic_device_mesh, config.experiment) if config.diloco is not None else None
 
         scheduler = get_scheduler(
             sched_type=config.optim.sched_type,
@@ -287,11 +287,11 @@ def train(config: Config):
         if world_info.rank == 0:
             if not is_debug_py():
                 config.metric_logger_type = config.metric_logger_type.split(",")
+                # config.logger_config.
                 metric_logger = CombineMetricLogger(
                     project=config.project,
-                    config={"config": config.model_dump(), "world_info": world_info.json()},
+                    logger_config={"config": config.model_dump(), "world_info": world_info.json()},
                     resume=config.wandb_resume,
-                    name=config.run_name,
                     logger_cls=config.metric_logger_type,
                 )
             else:
@@ -389,8 +389,8 @@ def train(config: Config):
                     is_accumulating = grad_acc_step < gradient_accumulation_steps - 1
                     # no sync if we are accumulating gradients
 
-                if config.experiment.fsdp:
-                    model.set_requires_gradient_sync(not is_accumulating)
+                    if config.experiment.fsdp:
+                        model.set_requires_gradient_sync(not is_accumulating)
 
                     with sw.record_block("Load batch"):
                         # TODO/NOTE: We could overlap sending the batch with communication
@@ -467,7 +467,7 @@ def train(config: Config):
                     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).full_tensor()  # type: ignore (is a dtensor)
                 else:
                     scaler.unscale_(inner_optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
             with sw.record_block("Optimizer Step"):
                 if config.experiment.fsdp:
@@ -529,7 +529,7 @@ def train(config: Config):
                 log += f", diloco_peers: {metrics['num_peers']}"
 
             if world_info.rank == 0:
-                assert metric_logger is not None
+                # assert metric_logger is not None
                 metric_logger.log(metrics)
 
             logger.info(log)
@@ -624,7 +624,7 @@ if __name__ == "__main__":
         if not is_debug_py():
             login_wandb(os.environ["WANDB_API_KEY"])
 
-    # torch.set_default_device("cuda")
+    torch.set_default_device("cuda")
     torch.cuda.set_device(world_info.local_rank)
 
     def pretty_dict(d, indent=2):

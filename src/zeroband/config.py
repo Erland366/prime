@@ -180,7 +180,7 @@ class Config(BaseConfig):
     run_name: str | None = None
 
     # Logger
-    metric_logger_type: Literal["wandb", "dummy"] = "wandb"
+    metric_logger_type: str = "wandb"
     wandb_resume: bool = False
     log_level: Literal["NOTSET", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     log_all_rank: bool = False

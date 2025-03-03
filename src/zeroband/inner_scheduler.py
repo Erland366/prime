@@ -5,16 +5,22 @@ class ContinuousInnerStepScheduler:
         upper_steps: int,
         total_steps: int,
         reverse: bool = False,
+        warmup: int = 0,
+        inner_warmup_steps: int = 1
     ):
         self.lower_steps = lower_steps
         self.upper_steps = upper_steps
         self.total_steps = total_steps
+        self.warmup = warmup
         self.curr_step = 0
         self.curr_inner_steps = self.lower_steps
         self.reverse = reverse
         self.increment = (upper_steps - lower_steps) / total_steps
 
     def get_inner_steps(self):
+        if self.curr_step < self.warmup:
+            return self.inner_warmup_steps
+
         if not self.reverse:
             return int(min(max(self.lower_steps + (self.increment * self.curr_step), self.lower_steps), self.upper_steps))
         else:

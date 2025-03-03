@@ -48,7 +48,7 @@ from zeroband.utils.monitor import HttpMonitor
 from zeroband.models.llama import get_model
 from zeroband.utils.profiler import MemoryProfiler
 from zeroband.utils.world_info import get_world_info
-from zeroband.utils.logging import get_logger
+from zeroband.utils.logger import get_logger
 from zeroband.checkpoint import CkptManager, TrainingProgress
 from zeroband.lr_scheduler import get_scheduler
 from zeroband.inner_scheduler import ContinuousInnerStepScheduler, BinnedInnerStepScheduler

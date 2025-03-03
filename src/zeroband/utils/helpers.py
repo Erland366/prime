@@ -2,7 +2,7 @@ import sys
 import wandb
 import os
 
-from zeroband.utils.logging import get_logger
+from zeroband.utils.logger import get_logger
 from huggingface_hub import login, whoami
 
 def float_to_e_formatting(number: float) -> str:
