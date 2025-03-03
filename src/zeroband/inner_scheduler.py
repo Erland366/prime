@@ -1,4 +1,28 @@
-class ContinuousInnerStepScheduler:
+class BaseScheduler:
+    def __init__(
+        self, 
+        warmup: int = 0, 
+        inner_warmup_steps: int = 1,
+        reverse: bool = False
+    ):
+        self.warmup = warmup
+        self.inner_warmup_steps = inner_warmup_steps
+        self.reverse = reverse
+
+    def get_inner_steps(self):
+        if self.curr_step < self.warmup:
+            return self.inner_warmup_steps
+
+        return self._inner_method_steps()
+
+    def _inner_method_steps(self) -> int:
+        raise NotImplementedError
+
+    def step(self):
+        self.curr_step += 1
+        self.curr_inner_steps = self.get_inner_steps()
+
+class ContinuousInnerStepScheduler(BaseScheduler):
     def __init__(
         self,
         lower_steps: int,
@@ -8,29 +32,21 @@ class ContinuousInnerStepScheduler:
         warmup: int = 0,
         inner_warmup_steps: int = 1
     ):
+        super().__init__(warmup, inner_warmup_steps, reverse)
         self.lower_steps = lower_steps
         self.upper_steps = upper_steps
         self.total_steps = total_steps
-        self.warmup = warmup
         self.curr_step = 0
         self.curr_inner_steps = self.lower_steps
-        self.reverse = reverse
         self.increment = (upper_steps - lower_steps) / total_steps
 
-    def get_inner_steps(self):
-        if self.curr_step < self.warmup:
-            return self.inner_warmup_steps
-
+    def _inner_method_steps(self) -> int:
         if not self.reverse:
             return int(min(max(self.lower_steps + (self.increment * self.curr_step), self.lower_steps), self.upper_steps))
         else:
             return int(max(min(self.lower_steps + (self.increment * self.curr_step), self.lower_steps), self.upper_steps))
 
-    def step(self):
-        self.curr_step += 1
-        self.curr_inner_steps = self.get_inner_steps()
-
-class BinnedInnerStepScheduler:
+class BinnedInnerStepScheduler(BaseScheduler):
     def __init__(
         self,
         lower_steps: int,
@@ -39,13 +55,15 @@ class BinnedInnerStepScheduler:
         bin_size: int | None = None,
         num_bins: int | None = None,
         reverse: bool = False,
+        warmup: int = 0,
+        inner_warmup_steps: int = 1
     ):
+        super().__init__(warmup, inner_warmup_steps, reverse)
         self.lower_steps = lower_steps
         self.upper_steps = upper_steps
         self.total_steps = total_steps
         self.curr_step = 0
         self.curr_inner_steps = self.lower_steps
-        self.reverse = reverse
 
         if bin_size is not None and num_bins is None:
             self.bin_size = bin_size
@@ -71,7 +89,3 @@ class BinnedInnerStepScheduler:
             return int(min(max(self.lower_steps + (self.increment * bin_index), self.lower_steps), self.upper_steps))
         else:
             return int(max(min(self.lower_steps + (self.increment * bin_index), self.lower_steps) , self.upper_steps))
-
-    def step(self):
-        self.curr_step += 1
-        self.curr_inner_steps = self.get_inner_steps()
