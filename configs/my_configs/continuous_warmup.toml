@@ -2,7 +2,7 @@ name_model = "150M"
 project = "150m_zeroband_adaptive"
 type_model = "llama2"
 metric_logger_type = "tensorboard,wandb"
-run_name = "continuous-weighted"
+run_name = "continuous_warmup"
 
 [train]
 micro_bs = 16 # change this base on the gpu
@@ -14,9 +14,11 @@ dataset_name_or_paths = "datasets/fineweb-edu/data"
 [experiment]
 fsdp = false
 inner_scheduler_type = "continuous"
-inner_scheduler_start = 10
-inner_scheduler_end = 500
-weighted_pseudo_gradient = true
+inner_scheduler_lower_steps = 10
+inner_scheduler_upper_steps = 2000
+inner_scheduler_bin_size = 10
+warmup = true
+inner_warmup_steps = 200
 
 [optim]
 batch_size = 512
@@ -28,4 +30,4 @@ inner_steps = 10
 compression = "no"
 
 [optim.optim]
-lr = 4e-4
+lr = 5e-5

@@ -116,6 +116,8 @@ class ExperimentConfig(BaseConfig):
     inner_scheduler_upper_steps: int = 2000
     inner_scheduler_bin_size: int | None = None 
     inner_scheduler_num_bins: int | None = None 
+    warmup: bool = False
+    inner_warmup_steps: int = 100
 
     weighted_pseudo_gradient: bool = False
 

@@ -10,8 +10,8 @@ class BaseScheduler:
         self.reverse = reverse
 
     def get_inner_steps(self):
-        if self.curr_step < self.warmup:
-            return self.inner_warmup_steps
+        if self.warmup and self.curr_step < self.inner_warmup_steps:
+            return 1
 
         return self._inner_method_steps()
 
@@ -83,7 +83,7 @@ class BinnedInnerStepScheduler(BaseScheduler):
 
         self.increment = (upper_steps - lower_steps) / (self.num_bins - 1) if self.num_bins > 1 else 0
 
-    def get_inner_steps(self):
+    def _inner_method_steps(self):
         bin_index = self.curr_step // self.bin_size
         if not self.reverse:
             return int(min(max(self.lower_steps + (self.increment * bin_index), self.lower_steps), self.upper_steps))

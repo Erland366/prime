@@ -241,7 +241,9 @@ def train(config: Config):
                     lower_steps=config.experiment.inner_scheduler_lower_steps,
                     upper_steps=config.experiment.inner_scheduler_upper_steps,
                     total_steps=config.optim.total_steps,
-                    reverse=config.experiment.reverse
+                    reverse=config.experiment.reverse,
+                    warmup=config.experiment.warmup,
+                    inner_warmup_steps=config.experiment.inner_warmup_steps,
                 )
             elif config.experiment.inner_scheduler_type == "binned":
                 inner_scheduler_cls = BinnedInnerStepScheduler
@@ -251,7 +253,9 @@ def train(config: Config):
                     total_steps=config.optim.total_steps,
                     reverse=config.experiment.reverse,
                     bin_size=config.experiment.inner_scheduler_bin_size,
-                    num_bins=config.experiment.inner_scheduler_num_bins
+                    num_bins=config.experiment.inner_scheduler_num_bins,
+                    warmup=config.experiment.warmup,
+                    inner_warmup_steps=config.experiment.inner_warmup_steps,
                 )
             else:
                 raise ValueError(f"Invalid value for {config.experiment.inner_scheduler_type}")

@@ -52,7 +52,6 @@ from zeroband.utils.metric_logger import (
 from zeroband.utils.profiler import MemoryProfiler
 from zeroband.utils.stopwatch import Stopwatch
 from zeroband.utils.world_info import get_world_info
-from zeroband.async 
 
 load_dotenv()
 
@@ -302,7 +301,7 @@ def train(config: Config):
             model = torch.compile(model) if not TYPE_CHECKING else model
 
     with sw.record_block("Asynchronous Setup"):
-        sync = 
+        pass
 
     if config.ckpt.resume is not None:
         with sw.record_block("Resume Checkpoint"):
