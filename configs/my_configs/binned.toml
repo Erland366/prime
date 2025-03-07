@@ -2,7 +2,7 @@ name_model = "150M"
 project = "150m_zeroband_adaptive"
 type_model = "llama2"
 metric_logger_type = "tensorboard,wandb"
-run_name = "continuous"
+run_name = "binned"
 
 [train]
 micro_bs = 16 # change this base on the gpu
