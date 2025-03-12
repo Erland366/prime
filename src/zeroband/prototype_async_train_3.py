@@ -15,7 +15,49 @@ from torch.nn import functional as F
 from torchvision import transforms
 from tqdm.auto import tqdm
 
+from dataclasses import dataclass, field
+from typing import Dict, Any, Optional
+
+import wandb
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+
+@dataclass
+class AsyncTrainerConfig:
+    """Configuration for the AsyncTrainer classes"""
+    # Model storage settings
+    storage_mode: str = "cpu"  # 'cpu', 'gpu', 'disk', 'true_async'
+    num_workers: int = 4
+    staleness_max: int = 5
+    alpha: float = 0.9  # Weight for global model update
+    
+    # Disk mode settings
+    checkpoint_dir: str = "async_checkpoints"
+    
+    # Optimizer settings
+    optimizer_class: Any = optim.SGD
+    optimizer_kwargs: Dict[str, Any] = field(default_factory=lambda: {"lr": 0.01, "momentum": 0.9})
+    
+    # Training settings
+    total_steps: int = 1000
+    batch_size: int = 32
+    
+    # Progress bar settings
+    tqdm_update_freq: int = 1  # Update progress bar every N steps
+    
+    # Logging settings
+    use_wandb: bool = True
+    wandb_project: str = "async-training"
+    wandb_name: Optional[str] = None
+    wandb_log_freq: int = 10  # Log to wandb every N steps
+    
+    def __post_init__(self):
+        # Validate settings
+        valid_modes = ['cpu', 'gpu', 'disk', 'true_async']
+        if self.storage_mode not in valid_modes:
+            raise ValueError(f"storage_mode must be one of {valid_modes}")
 
 class SimpleCNN(nn.Module):
     def __init__(self):
@@ -46,33 +88,40 @@ class AsyncTrainerBase:
     def __init__(
         self,
         model: nn.Module,
-        num_workers: int=4,
-        staleness_max: int=5,
-        alpha: float=0.9,
+        config: AsyncTrainerConfig,
     ):
         self.model = model
         self.device = device
-        self.num_workers = num_workers
-        self.staleness_max = staleness_max
-        self.alpha = alpha
+        self.config = config
+        self.num_workers = config.num_workers
+        self.staleness_max = config.staleness_max
+        self.alpha = config.alpha
 
         self.global_version = 0
-        self.worker_versions = [0] * num_workers
+        self.worker_versions = [0] * self.num_workers
 
         self.param_history = {}
-        self.param_history_depth = staleness_max + 2
+        self.param_history_depth = self.staleness_max + 2
 
         for name, param in self.model.named_parameters():
             self.param_history[name] = deque(maxlen=self.param_history_depth)
             self.param_history[name].append((0, param.data.clone()))
 
-        self.worker_active = [False] * num_workers
-        self.worker_positions = [0] * num_workers
+        self.worker_active = [False] * self.num_workers
+        self.worker_positions = [0] * self.num_workers
         self.loss_history = []
         self.worker_history = []
         
-        # Create optimizers for each worker
-        self.worker_optimizers = [None] * num_workers
+        self.worker_optimizers = [None] * self.num_workers
+        
+        # Initialize wandb if enabled
+        self.use_wandb = config.use_wandb
+        if self.use_wandb:
+            wandb_config = {
+                "model_type": model.__class__.__name__,
+                **vars(config)
+            }
+            wandb.init(project=config.wandb_project, name=config.wandb_name, config=wandb_config)
 
     def _snapshot_parameters(self):
         for name, param in self.model.named_parameters():
@@ -113,18 +162,25 @@ class AsyncTrainerBase:
         self.global_version += 1
         self._snapshot_parameters()
         
-        # Track worker history
+        # Update worker version to latest AFTER contributing
+        self.worker_versions[worker_id] = self.global_version
+        
         self.worker_history.append((self.global_version, worker_id))
         
         tqdm.write(f"Global model updated to version {self.global_version} by worker {worker_id}")
     
-    def train_step(self, dataloader, total_steps=100, optimizer_class=optim.SGD, 
-                  optimizer_kwargs={"lr": 0.01, "momentum": 0.9}):
-        # Create a pool of worker processes
+    def train_step(self, dataloader, total_steps=None, optimizer_class=None, 
+                  optimizer_kwargs=None):
+        if total_steps is None:
+            total_steps = self.config.total_steps
+        if optimizer_class is None:
+            optimizer_class = self.config.optimizer_class
+        if optimizer_kwargs is None:
+            optimizer_kwargs = self.config.optimizer_kwargs
+            
         step = 0
         self.initialize_worker_models()
         
-        # Create persistent data loaders (using cycle to continue iteration)
         worker_dataloaders = [cycle(dataloader) for _ in range(self.num_workers)]
         
         main_pbar = tqdm(total=total_steps, desc="Overall Progress", position=0)
@@ -155,20 +211,11 @@ class AsyncTrainerBase:
                         worker_model.parameters(), **optimizer_kwargs)
                 else:
                     worker_model = self.get_worker_model(worker_id)
-
-                # Check if worker needs initialization
-                if self.worker_optimizers[worker_id] is None:
-                    self.worker_optimizers[worker_id] = optimizer_class(
-                        worker_model.parameters(), **optimizer_kwargs
-                    )
-
                 worker_device = next(worker_model.parameters()).device
                 
-                # Mark worker as active
                 if not self.worker_active[worker_id]:
                     self.worker_active[worker_id] = True
                     
-                    # Simulate staleness - worker gets a version of parameters
                     staleness = random.randint(0, self.staleness_max)
                     target_version = max(0, self.global_version - staleness)
     
@@ -180,51 +227,61 @@ class AsyncTrainerBase:
                     })
                     worker_pbars[worker_id].refresh()
     
-                # Get batch from the worker's dataloader
                 data, target = next(worker_dataloaders[worker_id])
                 data, target = data.to(self.device), target.to(self.device)
                 self.worker_positions[worker_id] += 1
                 
-                # Update progress bar for this worker
-                worker_pbars[worker_id].total = self.worker_positions[worker_id]
-                worker_pbars[worker_id].n = self.worker_positions[worker_id] - 1
-                worker_pbars[worker_id].refresh()
+                # Only update tqdm progress at configured frequency
+                if self.worker_positions[worker_id] % self.config.tqdm_update_freq == 0:
+                    worker_pbars[worker_id].total = self.worker_positions[worker_id]
+                    worker_pbars[worker_id].n = self.worker_positions[worker_id] - 1
+                    worker_pbars[worker_id].refresh()
                 
                 # Get optimizer for this worker
-                optimizer = self.worker_optimizers[worker_id]
+                # TODO: THIS IS STILL RECREATE THE OPTIMIZER EVERY TIME
+                # WHICH MEANS WE LOSE THE STATE OF THE OPTIMIZER
+                optimizer = optimizer_class(worker_model.parameters(), **optimizer_kwargs)
+                self.worker_optimizers[worker_id] = optimizer
 
-                # Ensure all tensors in optimizer state are on the right device
-                for group in optimizer.param_groups:
-                    for p in group['params']:
-                        if p.device != worker_device:
-                            # This shouldn't happen but let's be safe
-                            raise RuntimeError(f"Parameter device mismatch: {p.device} vs {worker_device}")
-
-                # Compute gradients and update worker model
                 optimizer.zero_grad()
                 loss = self._compute_loss(worker_model, data, target)
                 loss.backward()
                 optimizer.step()
-                # Track loss
                 self.loss_history.append((step, worker_id, loss.item()))
                 
-                # Update progress bar with loss information
                 current_postfix = worker_pbars[worker_id].postfix if isinstance(worker_pbars[worker_id].postfix, dict) else {}
                 current_postfix["loss"] = f"{loss.item():.4f}"
                 worker_pbars[worker_id].set_postfix(current_postfix)
                 
-                # Store previous global version to check if it was updated
                 prev_global_version = self.global_version
                 
-                # Update worker model and potentially update global model
                 self.update_worker_model(worker_model, worker_id)
                 
-                # Check if global version was incremented and update progress bar accordingly
                 if self.global_version > prev_global_version:
                     global_pbar.n = self.global_version
                     global_pbar.refresh()
                 
-                # Simulate worker completion
+                # Log metrics to wandb
+                if self.use_wandb and (step % self.config.wandb_log_freq == 0 or step == total_steps - 1):
+                    metrics = {
+                        "step": step,
+                        "global_version": self.global_version,
+                        "worker_loss": loss.item(),
+                        "worker_id": worker_id,
+                        "worker_version": self.worker_versions[worker_id],
+                        "staleness": self.global_version - self.worker_versions[worker_id],
+                    }
+                    
+                    # Add worker-specific metrics
+                    for i in range(self.num_workers):
+                        metrics[f"worker_{i}_active"] = self.worker_active[i]
+                        metrics[f"worker_{i}_version"] = self.worker_versions[i]
+                        metrics[f"worker_{i}_staleness"] = self.global_version - self.worker_versions[i]
+                    
+                    # Log number of active workers
+                    metrics["active_workers"] = sum(self.worker_active)
+                    wandb.log(metrics)
+                
                 if random.random() < 0.2:  # 20% chance of worker finishing its task
                     self.worker_active[worker_id] = False
                     worker_pbars[worker_id].set_postfix({
@@ -232,22 +289,17 @@ class AsyncTrainerBase:
                         "loss": f"{loss.item():.4f}",
                         "active": "No"
                     })
-
-                if step % 20 == 0 and step > 0:
-                    # breakpoint()
-                    pass
                 
                 step += 1
-                main_pbar.update(1)
+                if step % self.config.tqdm_update_freq == 0:
+                    main_pbar.update(self.config.tqdm_update_freq)
                 
         finally:
-            # Close all progress bars
             main_pbar.close()
             for pbar in worker_pbars.values():
                 pbar.close()
             global_pbar.close()
             
-            # Clean up resources
             for optimizer in self.worker_optimizers:
                 if optimizer is not None:
                     del optimizer
@@ -285,15 +337,20 @@ class AsyncTrainerBase:
         print(f'\nTest set: Average loss: {test_loss:.4f}, '
               f'Accuracy: {correct}/{len(test_loader.dataset)} ({accuracy:.2f}%)\n')
         
+        # Log evaluation metrics to wandb
+        if self.use_wandb:
+            wandb.log({
+                "test_loss": test_loss,
+                "test_accuracy": accuracy,
+                "global_version": self.global_version
+            })
+        
         return test_loss, accuracy
     
     def cleanup(self):
-        """Clean up resources"""
-        # Clear parameter history
         for name in self.param_history:
             self.param_history[name].clear()
         
-        # Delete optimizers
         for i in range(len(self.worker_optimizers)):
             if self.worker_optimizers[i] is not None:
                 del self.worker_optimizers[i]
@@ -304,10 +361,9 @@ class GPUAsyncTrainer(AsyncTrainerBase):
     def __init__(
         self,
         model: nn.Module,
-        num_workers: int=4,
-        staleness_max: int=5,
+        config: AsyncTrainerConfig,
     ):
-        super().__init__(model, num_workers, staleness_max)
+        super().__init__(model, config)
         self.worker_models = None
 
     def initialize_worker_models(self) -> None:
@@ -325,9 +381,7 @@ class GPUAsyncTrainer(AsyncTrainerBase):
         return self.worker_models[worker_id]
 
     def update_worker_model(self, worker_model: nn.Module, worker_id: int) -> None:
-        # Update the worker model first
         self.worker_models[worker_id] = worker_model
-        # Then update the global model
         self.update_global_model(worker_model, worker_id)
 
 
@@ -346,48 +400,31 @@ class CPUAsyncTrainer(AsyncTrainerBase):
         print(f"Initialized {self.num_workers} worker models in CPU memory")
 
     def get_worker_model(self, worker_id: int) -> nn.Module:
-        # Get parameters for this version
         version_params = self._get_parameter_version(self.worker_versions[worker_id])
         
-        # Apply parameters to CPU model first
         with torch.no_grad():
             for name, param in self.worker_models[worker_id].named_parameters():
                 if name in version_params:
                     param.data.copy_(version_params[name])
         
-        # Then move to device and return
-        return self.worker_models[worker_id].to(self.device)
-
+        gpu_model = self.worker_models[worker_id].to(self.device)
+        
+        if self.worker_optimizers[worker_id] is not None:
+            self.worker_optimizers[worker_id] = None
+        
+        return gpu_model
+    
     def update_worker_model(self, worker_model: nn.Module, worker_id: int) -> None:
-        # First update the global model while the worker model is still on the device
+        # Update global first while still on device
         self.update_global_model(worker_model, worker_id)
         
-        # Now handle moving model to CPU and updating optimizer
+        # Then move to CPU
+        self.worker_models[worker_id] = worker_model.cpu()
+        
+        # Clear optimizer since parameters moved
         if self.worker_optimizers[worker_id] is not None:
-            # Get the current optimizer state before moving the model
-            optimizer_state = self.worker_optimizers[worker_id].state_dict()
-            
-            # Move all tensors in optimizer state to CPU first
-            for state in optimizer_state['state'].values():
-                for k, v in state.items():
-                    if torch.is_tensor(v):
-                        state[k] = v.cpu()
-            
-            # Now move model to CPU
-            cpu_model = worker_model.cpu()
-            self.worker_models[worker_id] = cpu_model
-            
-            # Re-create optimizer with CPU model
-            self.worker_optimizers[worker_id] = type(self.worker_optimizers[worker_id])(
-                cpu_model.parameters(),
-                **{k: v for k, v in self.worker_optimizers[worker_id].defaults.items()}
-            )
-            
-            # Load the CPU optimizer state
-            self.worker_optimizers[worker_id].load_state_dict(optimizer_state)
-        else:
-            # Just move the model to CPU
-            self.worker_models[worker_id] = worker_model.cpu()
+            del self.worker_optimizers[worker_id]
+            self.worker_optimizers[worker_id] = None
 
 
 class DiskAsyncTrainer(AsyncTrainerBase):
@@ -397,69 +434,132 @@ class DiskAsyncTrainer(AsyncTrainerBase):
         num_workers: int=4,
         staleness_max: int=5,
         checkpoint_dir: str="async_checkpoints",
+        alpha: float=0.9,  # Make alpha configurable
     ):
-        super().__init__(model, num_workers, staleness_max)
+        super().__init__(model, num_workers, staleness_max, alpha)
         self.checkpoint_dir = checkpoint_dir
         self.base_model = copy.deepcopy(model)
-
+        
+        # Always keep the latest version in memory
+        self.latest_state_dict = copy.deepcopy(model.state_dict())
+        
+        # Track which versions have been saved to disk
+        self.saved_versions = set([0])
+        
+        # Save version threshold - save at most this many versions
+        self.max_saved_versions = staleness_max + 5
+        
+        # Keep a small cache of recent versions in memory
+        self.version_cache = {}  # version -> state_dict
+        self.version_cache[0] = self.latest_state_dict
+        
         if not os.path.exists(checkpoint_dir):
             os.makedirs(checkpoint_dir)
+        
+        # Save initial model
+        self._save_version_to_disk(0, self.latest_state_dict)
+
+    def _save_version_to_disk(self, version, state_dict):
+        path = os.path.join(self.checkpoint_dir, f"global_v{version}.pt")
+        torch.save(state_dict, path)
+        self.saved_versions.add(version)
+        
+        # Clean up old versions if we have too many
+        if len(self.saved_versions) > self.max_saved_versions:
+            versions_to_keep = sorted(self.saved_versions)[-self.max_saved_versions:]
+            for v in list(self.saved_versions):
+                if v not in versions_to_keep:
+                    old_path = os.path.join(self.checkpoint_dir, f"global_v{v}.pt")
+                    if os.path.exists(old_path):
+                        os.remove(old_path)
+                    self.saved_versions.remove(v)
+
+    def _get_version_from_disk(self, version):
+        path = os.path.join(self.checkpoint_dir, f"global_v{version}.pt")
+        if os.path.exists(path):
+            return torch.load(path)
+        return None
 
     def initialize_worker_models(self) -> None:
-        initial_state = self.model.cpu().state_dict()
-
+        # Reset worker versions
         for worker_id in range(self.num_workers):
-            path = os.path.join(self.checkpoint_dir, f"worker_{worker_id}_v{self.worker_versions[worker_id]}.pt")
-            torch.save(initial_state, path)
+            self.worker_versions[worker_id] = 0
         
-        print(f"Initialized {self.num_workers} worker models on disk at {self.checkpoint_dir}")
+        print(f"Initialized {self.num_workers} worker models (references) at {self.checkpoint_dir}")
+
+    def _snapshot_parameters(self):
+        # Override to save parameters to both memory history and update latest state dict
+        super()._snapshot_parameters()
+        
+        # Update latest state dict
+        self.latest_state_dict = copy.deepcopy(self.model.state_dict())
+        
+        # Add to cache
+        self.version_cache[self.global_version] = self.latest_state_dict
+        
+        # Clean cache if needed
+        if len(self.version_cache) > self.max_saved_versions // 2:
+            versions_to_keep = sorted(self.version_cache.keys())[-self.max_saved_versions//2:]
+            for v in list(self.version_cache.keys()):
+                if v not in versions_to_keep and v != 0:  # always keep version 0
+                    del self.version_cache[v]
+        
+        # Save less frequently to disk
+        if self.global_version % 5 == 0 or random.random() < 0.1:  # Save periodically or with small chance
+            self._save_version_to_disk(self.global_version, self.latest_state_dict)
 
     def get_worker_model(self, worker_id: int) -> nn.Module:
-        version_params = self._get_parameter_version(self.worker_versions[worker_id])
-
+        # Create a fresh model
         worker_model = copy.deepcopy(self.base_model).to(self.device)
-
-        with torch.no_grad():
-            for name, param in worker_model.named_parameters():
-                if name in version_params:
-                    param.data.copy_(version_params[name].to(self.device))
-
+        target_version = self.worker_versions[worker_id]
+        
+        # Try to load parameters from cache first
+        found_in_cache = False
+        if target_version in self.version_cache:
+            # Load from cache
+            state_dict = self.version_cache[target_version]
+            worker_model.load_state_dict(state_dict)
+            found_in_cache = True
+        
+        # If not in cache, try to load from disk
+        elif target_version in self.saved_versions:
+            state_dict = self._get_version_from_disk(target_version)
+            if state_dict:
+                worker_model.load_state_dict(state_dict)
+                # Add to cache for future use
+                self.version_cache[target_version] = state_dict
+                found_in_cache = True
+        
+        # If not found in cache or disk, use parameter history
+        if not found_in_cache:
+            version_params = self._get_parameter_version(target_version)
+            with torch.no_grad():
+                for name, param in worker_model.named_parameters():
+                    if name in version_params:
+                        param.data.copy_(version_params[name].to(self.device))
+        
         return worker_model
 
     def update_worker_model(self, worker_model: nn.Module, worker_id: int) -> None:
-        # Save both model and optimizer state to disk
-        model_path = os.path.join(self.checkpoint_dir, f"worker_{worker_id}_v{self.global_version}_model.pt")
-        optim_path = os.path.join(self.checkpoint_dir, f"worker_{worker_id}_v{self.global_version}_optim.pt")
-        
-        # Save model state
-        torch.save(worker_model.cpu().state_dict(), model_path)
-        
-        # Save optimizer state if it exists
-        if self.worker_optimizers[worker_id] is not None:
-            torch.save(self.worker_optimizers[worker_id].state_dict(), optim_path)
-        
-        # Clean up old version
-        old_model_path = os.path.join(self.checkpoint_dir, f"worker_{worker_id}_v{self.worker_versions[worker_id]}_model.pt")
-        old_optim_path = os.path.join(self.checkpoint_dir, f"worker_{worker_id}_v{self.worker_versions[worker_id]}_optim.pt")
-        
-        for old_path in [old_model_path, old_optim_path]:
-            if os.path.exists(old_path) and old_path != model_path:
-                os.remove(old_path)
-                
-        # Then update the global model
+        # Use parent method for consistency
         self.update_global_model(worker_model, worker_id)
-    
-    def cleanup(self):
-        """Clean up resources including disk files"""
-        super().cleanup()
         
-        # Remove all checkpoint files
-        for filename in os.listdir(self.checkpoint_dir):
-            if filename.startswith("worker_") and filename.endsWith(".pt"):
-                os.remove(os.path.join(self.checkpoint_dir, filename))
+        # Cache the latest state dict
+        self.latest_state_dict = copy.deepcopy(self.model.state_dict())
+        self.version_cache[self.global_version] = self.latest_state_dict
+        
+        # Save to disk occasionally
+        if self.global_version % 5 == 0 or random.random() < 0.1:
+            self._save_version_to_disk(self.global_version, self.latest_state_dict)
+
+        # Clean cache if needed
+        if len(self.version_cache) > self.max_saved_versions // 2:
+            versions_to_keep = sorted(self.version_cache.keys())[-self.max_saved_versions//2:]
+            for v in list(self.version_cache.keys()):
+                if v not in versions_to_keep and v != 0:  # always keep version 0
+                    del self.version_cache[v]
 
 
-# Implement true asynchronous training using multiprocessing
 class TrueAsyncTrainer:
     def __init__(
         self,
@@ -470,7 +570,7 @@ class TrueAsyncTrainer:
         optimizer_class=optim.SGD,
         optimizer_kwargs={"lr": 0.01, "momentum": 0.9}
     ):
-        self.model = model.share_memory()  # Enable model sharing between processes
+        self.model = model.share_memory()  
         self.device = device
         self.num_workers = num_workers
         self.staleness_max = staleness_max
@@ -478,12 +578,10 @@ class TrueAsyncTrainer:
         self.optimizer_class = optimizer_class
         self.optimizer_kwargs = optimizer_kwargs
         
-        # Shared variables for synchronization
         self.global_version = mp.Value('i', 0)
         self.stop_signal = mp.Value('b', False)
         self.param_lock = mp.Lock()
         
-        # For tracking metrics
         self.loss_queue = mp.Queue()
         self.update_queue = mp.Queue()
         
@@ -491,26 +589,21 @@ class TrueAsyncTrainer:
         worker_model = copy.deepcopy(self.model).to(self.device)
         optimizer = self.optimizer_class(worker_model.parameters(), **self.optimizer_kwargs)
         
-        # Create cyclic dataloader
         data_iter = cycle(dataloader)
         
         steps = 0
         while not self.stop_signal.value:
-            # Get current global version
             with self.param_lock:
                 current_version = self.global_version.value
                 
-                # Apply staleness (lag behind global model)
                 staleness = random.randint(0, self.staleness_max)
                 worker_version = max(0, current_version - staleness)
                 
-                # Apply global model parameters to worker model
                 with torch.no_grad():
                     for w_param, g_param in zip(worker_model.parameters(), self.model.parameters()):
                         w_param.data.copy_(g_param.data.to(self.device))
             
-            # Train for a few local steps
-            local_steps = random.randint(1, 3)  # Do 1-3 local updates
+            local_steps = random.randint(1, 3)  
             
             for _ in range(local_steps):
                 data, target = next(data_iter)
@@ -522,27 +615,21 @@ class TrueAsyncTrainer:
                 loss.backward()
                 optimizer.step()
                 
-                # Report loss
                 self.loss_queue.put((steps, worker_id, loss.item()))
                 steps += 1
             
-            # Update global model
             with self.param_lock:
-                # Apply updates to global model with alpha smoothing
                 with torch.no_grad():
                     for g_param, w_param in zip(self.model.parameters(), worker_model.parameters()):
                         g_param.data = self.alpha * g_param.data + (1 - self.alpha) * w_param.cpu().data
                 
-                # Increment global version
                 self.global_version.value += 1
                 
-                # Report update
                 self.update_queue.put((self.global_version.value, worker_id))
     
     def train(self, dataloader, total_steps=1000):
         processes = []
         
-        # Launch worker processes
         for worker_id in range(self.num_workers):
             p = mp.Process(
                 target=self.worker_process,
@@ -551,7 +638,6 @@ class TrueAsyncTrainer:
             p.start()
             processes.append(p)
         
-        # Track progress
         pbar = tqdm(total=total_steps, desc="Global Training Progress")
         loss_history = []
         update_history = []
@@ -559,7 +645,6 @@ class TrueAsyncTrainer:
         step = 0
         try:
             while step < total_steps:
-                # Process losses
                 while not self.loss_queue.empty():
                     step_info = self.loss_queue.get()
                     loss_history.append(step_info)
@@ -567,13 +652,12 @@ class TrueAsyncTrainer:
                     if step <= total_steps:
                         pbar.update(1)
                     
-                # Process updates
                 while not self.update_queue.empty():
                     update_info = self.update_queue.get()
                     update_history.append(update_info)
                     tqdm.write(f"Global model updated to v{update_info[0]} by worker {update_info[1]}")
                 
-                time.sleep(0.01)  # Small sleep to avoid busy waiting
+                time.sleep(0.01)  
                 
         except KeyboardInterrupt:
             print("Training interrupted")
@@ -581,10 +665,8 @@ class TrueAsyncTrainer:
             print(f"Error during training: {e}")
         
         finally:
-            # Signal workers to stop
             self.stop_signal.value = True
             
-            # Wait for processes to finish
             for p in processes:
                 p.join()
                 
@@ -616,23 +698,20 @@ class TrueAsyncTrainer:
         return test_loss, accuracy
 
 
-def create_async_trainer(model, storage_mode='cpu', num_workers=4, staleness_max=5, **kwargs):
-    if storage_mode == 'gpu':
-        return GPUAsyncTrainer(model, num_workers, staleness_max)
-    elif storage_mode == 'cpu':
-        return CPUAsyncTrainer(model, num_workers, staleness_max)
-    elif storage_mode == 'disk':
-        checkpoint_dir = kwargs.get('checkpoint_dir', 'async_checkpoints')
-        return DiskAsyncTrainer(model, num_workers, staleness_max, checkpoint_dir)
-    elif storage_mode == 'true_async':
-        optimizer_class = kwargs.get('optimizer_class', optim.SGD)
-        optimizer_kwargs = kwargs.get('optimizer_kwargs', {"lr": 0.01, "momentum": 0.9})
-        return TrueAsyncTrainer(model, num_workers, staleness_max, 
-                               alpha=kwargs.get('alpha', 0.9),
-                               optimizer_class=optimizer_class,
-                               optimizer_kwargs=optimizer_kwargs)
+def create_async_trainer(model, config=None):
+    if config is None:
+        config = AsyncTrainerConfig()
+    
+    if config.storage_mode == 'gpu':
+        return GPUAsyncTrainer(model, config)
+    elif config.storage_mode == 'cpu':
+        return CPUAsyncTrainer(model, config)
+    elif config.storage_mode == 'disk':
+        return DiskAsyncTrainer(model, config)
+    elif config.storage_mode == 'true_async':
+        return TrueAsyncTrainer(model, config)
     else:
-        raise ValueError(f"Unknown storage mode: {storage_mode}")
+        raise ValueError(f"Unknown storage mode: {config.storage_mode}")
 
 def prepare_dataset():
     transform = transforms.Compose([
@@ -649,15 +728,30 @@ def prepare_dataset():
     return train_loader, test_loader
 
 def main():
+    config = AsyncTrainerConfig(
+        storage_mode='disk',
+        num_workers=4, 
+        staleness_max=5,
+        total_steps=10000,
+        batch_size=32,
+        tqdm_update_freq=5,  # Update progress bars every 5 steps
+        use_wandb=True,
+        wandb_project="async-training-experiment",
+        wandb_name="disk-storage-test",
+        wandb_log_freq=10  # Log to wandb every 10 steps
+    )
+    
     model = SimpleCNN().to(device)
-
-    trainer = create_async_trainer(model, storage_mode='cpu', num_workers=1, staleness_max=5)
-
-    train_loader, test_loader = prepare_dataset()
-
-    trainer.train_step(train_loader, total_steps=10000)
-
+    trainer = create_async_trainer(model, config)
+    
+    train_loader, test_loader = prepare_dataset(batch_size=config.batch_size)
+    
+    trainer.train_step(train_loader)
     trainer.evaluate(test_loader)
+    
+    # Close wandb run
+    if config.use_wandb:
+        wandb.finish()
 
 if __name__ == '__main__':
     main()
